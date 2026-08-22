@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    // No DOM. `server/` is a Node program; if anything in it reaches for a browser
+    // global the compile should fail rather than the runtime. `frontend/` gets its own
+    // config with DOM in phase 8.
+    "lib": ["ES2023"],
+
+    "strict": true,
+
+    // `buffer[i]` is typed `number | undefined` instead of `number`. In a byte parser
+    // that is not pedantry -- reading one past the end of a chunk is the bug class this
+    // whole project has to get right.
+    "noUncheckedIndexedAccess": true,
+
+    // Distinguishes "header absent" from "header present but undefined", which the
+    // header map in module 2 depends on.
+    "exactOptionalPropertyTypes": true,
+
+    // Forces `import type` to be written out rather than inferred away. CLAUDE.md rule 4
+    // ("nothing in server/ may import node:http as a value") is only checkable because
+    // this makes the distinction visible in the source.
+    "verbatimModuleSyntax": true,
+
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": ["server", "app", "test", "bench"]
+}

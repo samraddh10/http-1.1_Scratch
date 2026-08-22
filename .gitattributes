@@ -1,0 +1,7 @@
+# This project parses HTTP, and HTTP line endings are CRLF by specification.
+# Git's autocrlf normalisation rewriting line endings inside a test fixture would
+# silently corrupt the exact bytes the parser is being tested against, so pin LF in the
+# working tree everywhere and keep every CRLF in the protocol an explicit \r\n in source.
+* text=auto eol=lf
+*.png binary
+*.ico binary

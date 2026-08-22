@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# vite build output; regenerate with `npm run build:frontend`
+public/*
+!public/.gitkeep
+
+# Planning and tooling artifacts -- local only, never published.
+# Enforced here as well as in CLAUDE.md so `git add -A` cannot stage them.
+CLAUDE.md
+docs/
+.claude/
+.code-review-graph/
+DECISIONS.md
+PLAN_CHANGES.md
