@@ -45,16 +45,30 @@ export function describe(bytes: Buffer): string {
     )
 }
 
+export interface ConnectOptions {
+  /**
+   * Connect without reading. The kernel receive buffer fills, the server stops being able
+   * to write, and its backpressure path is the thing under test. `resume()` starts
+   * reading; nothing sent in the meantime is lost.
+   */
+  paused?: boolean
+}
+
 export interface RawConnection {
   write(data: string | Buffer): Promise<void>
   read(condition: ReadCondition | typeof untilClose, options?: ReadOptions): Promise<Buffer>
   received(): Buffer
+  resume(): void
   readonly closed: boolean
   end(): Promise<void>
   close(): Promise<void>
 }
 
-export async function connect(port: number, host = '127.0.0.1'): Promise<RawConnection> {
+export async function connect(
+  port: number,
+  host = '127.0.0.1',
+  options: ConnectOptions = {},
+): Promise<RawConnection> {
   const socket = new Socket()
   socket.connect(port, host)
   await once(socket, 'connect')
@@ -83,8 +97,13 @@ export async function connect(port: number, host = '127.0.0.1'): Promise<RawConn
     notify()
   })
 
+  // Attaching a 'data' listener puts the socket in flowing mode, so the pause has to come
+  // after it. Bytes already in flight stay in the kernel buffer until resume().
+  if (options.paused) socket.pause()
+
   return {
     received: () => buffer,
+    resume: () => void socket.resume(),
     get closed() {
       return ended
     },

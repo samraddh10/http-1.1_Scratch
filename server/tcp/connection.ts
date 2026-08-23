@@ -1,10 +1,13 @@
-// module 1.2  server/tcp/connection.ts -- per-socket state object, lifecycle, timers
+// module 1.2/1.4  server/tcp/connection.ts -- per-socket state, lifecycle, timers, write path
 
 import type { Socket } from 'node:net'
 
 import { config } from '../config.js'
 
 export type CloseReason = 'client-end' | 'client-error' | 'idle-timeout' | 'server-shutdown'
+
+/** Called when a written chunk has been handed to the OS, or when it never will be. */
+export type FlushCallback = (error?: Error) => void
 
 export interface ConnectionHandlers {
   //onData — called when data arrives, passing the Connection and the received Buffer (raw bytes)
@@ -35,6 +38,8 @@ export class Connection {
   error: Error | undefined
 
   readonly #handlers: ConnectionHandlers
+  #drainWaiters: { resolve: () => void; reject: (error: Error) => void }[] = []
+  #closeIntent: CloseReason | undefined
 
   constructor(socket: Socket, options: ConnectionOptions = {}) {
     const now = Date.now()
@@ -50,9 +55,14 @@ export class Connection {
 
     //Whenever the client sends data, Node fires a 'data' event on the socket with the bytes as a Buffer
     socket.on('data', (chunk: Buffer) => this.#receive(chunk))
-    socket.on('end', () => this.destroy('client-end'))
+    socket.on('drain', () => this.#drained())
     socket.on('timeout', () => this.destroy('idle-timeout'))
-    socket.on('close', () => this.destroy('client-end'))
+
+    // After end() the peer answers our FIN with its own, so the last event to arrive is a
+    // normal client disconnect and would otherwise be reported as one. Both of these are
+    // the same teardown; whichever wins the race must still name the close we initiated.
+    socket.on('end', () => this.destroy(this.#closeIntent ?? 'client-end'))
+    socket.on('close', () => this.destroy(this.#closeIntent ?? 'client-end'))
 
     // 'error' and 'close' are deliberately the same event with the same cleanup. An
     // abrupt client disconnect arrives as ECONNRESET on Windows where Linux delivers a
@@ -72,19 +82,88 @@ export class Connection {
     return Date.now() - this.openedAt
   }
 
-  //Purpose: Resets the idle clock by updating lastActivityAt to right now.
+  /** True while `write()` will still accept bytes. */
+  get writable(): boolean {
+    return !this.closed && this.socket.writable
+  }
+
+  /** True once a write has been refused and the drain has not arrived yet. */
+  get needsDrain(): boolean {
+    return !this.closed && this.socket.writableNeedDrain
+  }
+
+  /** Bytes accepted by `write()` that the OS has not taken yet. */
+  get pendingBytes(): number {
+    return this.closed ? 0 : this.socket.writableLength
+  }
+
   touch(): void {
     this.lastActivityAt = Date.now()
   }
 
-  //Purpose: Safely sends data out to the client, while updating byte-count stats and the idle timer, and refusing to write if the connection is already closed.
-  write(data: Buffer | string): boolean {
-    if (this.closed) return false
+  /**
+   * Sends bytes to the client.
+   *
+   * Returns false when the producer should stop and wait for `whenDrained()`. That return
+   * value is the entire point of this method and must not be ignored: `socket.write()`
+   * does not put bytes on the network, it copies them into a send buffer, and once that
+   * buffer is full every further write is held in this process instead. A client that
+   * connects and then stops reading -- a phone on a dead train, or an attacker doing it
+   * deliberately -- will otherwise pull an entire response into memory, times every
+   * connection in the registry.
+   *
+   * `onFlush` fires when this chunk reaches the OS, or with an error if it never does.
+   */
+  write(data: Buffer | string, onFlush?: FlushCallback): boolean {
+    if (!this.writable) {
+      onFlush?.(new Error(`wirehttp: write on a connection that is ${this.closed ? 'closed' : 'ending'}`))
+      return false
+    }
 
     const bytes = typeof data === 'string' ? Buffer.from(data, 'latin1') : data
     this.bytesWritten += bytes.length
     this.touch()
-    return this.socket.write(bytes)
+
+    // The queue behind this call is the socket's own, not a second one here. It already
+    // preserves order and reports fullness; a queue at this level could only duplicate
+    // that and find new ways to reorder a response.
+    return onFlush
+      ? this.socket.write(bytes, (error) => onFlush(error ?? undefined))
+      : this.socket.write(bytes)
+  }
+
+  /**
+   * Resolves when the socket will accept writes again, and rejects if the connection dies
+   * first. This is the seam module 5 plugs into: `ServerResponse._write` withholds its
+   * callback until this settles, which is what makes `stream.pipe(res)` pause a file read
+   * instead of buffering the file.
+   */
+  whenDrained(): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error(`wirehttp: connection closed while draining (${this.closeReason})`))
+    }
+    if (!this.socket.writableNeedDrain) return Promise.resolve()
+
+    return new Promise<void>((resolve, reject) => {
+      this.#drainWaiters.push({ resolve, reject })
+    })
+  }
+
+  /**
+   * Closes once everything already written has been flushed.
+   *
+   * `destroy()` discards whatever is still queued, which for a response written
+   * immediately before it means the client gets a reset instead of the response. Every
+   * server-initiated close that follows a response -- 3.4's protocol errors, 4.1's
+   * `Connection: close` -- goes through here.
+   */
+  end(reason: CloseReason = 'server-shutdown'): void {
+    if (this.closed || this.#closeIntent !== undefined) return
+
+    this.#closeIntent = reason
+    // The idle timeout stays armed: if the peer never reads, the flush never completes
+    // and this is the only thing that reclaims the socket.
+    this.socket.end()
   }
 
   destroy(reason: CloseReason): void {
@@ -95,15 +174,31 @@ export class Connection {
     this.socket.setTimeout(0)
     this.socket.destroy()
 
+    this.#settleDrainWaiters(new Error(`wirehttp: connection closed (${reason})`))
     this.#handlers.onClose?.(this, reason)
   }
 
-  //Purpose: A private method that runs every time raw data arrives on the socket. It updates byte-count stats, resets the idle timer, and hands the data off to the external onData handler.
   #receive(chunk: Buffer): void {
     if (this.closed) return
 
     this.bytesRead += chunk.length
     this.touch()
     this.#handlers.onData?.(this, chunk)
+  }
+
+  #drained(): void {
+    // A drain means bytes actually left for the peer, which is activity: a slow but live
+    // reader must not be timed out as idle.
+    this.touch()
+    this.#settleDrainWaiters()
+  }
+
+  #settleDrainWaiters(error?: Error): void {
+    const waiting = this.#drainWaiters
+    this.#drainWaiters = []
+    for (const waiter of waiting) {
+      if (error) waiter.reject(error)
+      else waiter.resolve()
+    }
   }
 }
