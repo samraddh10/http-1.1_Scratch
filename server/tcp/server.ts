@@ -1,78 +1,74 @@
-//createServer — a function from Node's built-in net module used to create a TCP server.
-//AddressInfo — a type describing a bound network address (contains fields like address, port, family
-//Socket — a type representing one client connection. Also imported as a type only.
-import { createServer, type AddressInfo, type Socket } from 'node:net'
+// module 1.1  server/tcp/server.ts -- net.createServer, the accept loop, and a close() that resolves
+
+import { createServer, type AddressInfo } from 'node:net'
 
 import { config } from '../config.js'
+import { Connection, type ConnectionHandlers, type ConnectionOptions } from './connection.js'
 
-//it must accept a Socket and return nothing (void). This type is used to describe what a valid connection handler looks like.
-export type ConnectionHandler = (socket: Socket) => void
-
-//Defines the shape of an options object that can be passed when creating the server
-//It has one optional field, onConnection, which — if provided — must match the ConnectionHandler type above.
-export interface TcpServerOptions {
-  onConnection?: ConnectionHandler
+export interface TcpServerOptions extends ConnectionHandlers {
+  onConnection?(connection: Connection): void
+  idleTimeoutMs?: number
 }
 
 export interface TcpServer {
   listen(port?: number, host?: string): Promise<AddressInfo>
   close(): Promise<void>
-  //returns the current bound address, or null if not listening.
   address(): AddressInfo | null
+  connections(): readonly Connection[]
   readonly connectionCount: number
   readonly listening: boolean
 }
-//This is the default connection handler. It runs once per connected client. Every time that client sends data, 
-// this function writes back a message reporting how many bytes were in that specific chunk, and the running total of bytes received from that client so far.
-export function echoByteCounts(socket: Socket): void {
-  let total = 0
-  socket.on('data', (chunk: Buffer) => {
-    total += chunk.length
-    socket.write(`${chunk.length}/${total}\n`)
-  })
+
+/**
+ * Placeholder data handler: answers every chunk with `<chunk>/<total>\n`. Replaced in
+ * phase 2 by the request parser; nothing above module 1 should use it.
+ */
+export function echoByteCounts(connection: Connection, chunk: Buffer): void {
+  connection.write(`${chunk.length}/${connection.bytesRead}\n`)
 }
 
-//This is the main function of the file. It builds and returns a TcpServer object — a working TCP server with connection tracking, 
-// a safe listen()/close() API, and a pluggable handler for what happens on each new connection.
 export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
-  //Decides which handler to use for new connections.
-  const onConnection = options.onConnection ?? echoByteCounts
-  const sockets = new Set<Socket>()
-  //This creates the actual underlying Node TCP server.
+  const open = new Set<Connection>()
+
+  const handlers: ConnectionOptions = {
+    onData: options.onData ?? echoByteCounts,
+    onClose: (connection, reason) => {
+      open.delete(connection)
+      options.onClose?.(connection, reason)
+    },
+  }
+  if (options.idleTimeoutMs !== undefined) handlers.idleTimeoutMs = options.idleTimeoutMs
+
   const server = createServer(
     {
+      // Nagle delays a small write hoping to coalesce it with the next one, but in a
+      // request/response protocol the next write is the client's next request, which
+      // cannot arrive until it has our response. Node's own http server disables it too.
       noDelay: true,
     },
     (socket) => {
-      sockets.add(socket)
-      socket.once('close', () => {
-        sockets.delete(socket)
-      })
-      socket.on('error', () => {
-        socket.destroy()
-      })
-
-      onConnection(socket)
+      const connection = new Connection(socket, handlers)
+      open.add(connection)
+      options.onConnection?.(connection)
     },
   )
 
-  //Purpose: a small helper that safely retrieves the server's current address, and throws an error if something unexpected happens.
   function addressOrThrow(): AddressInfo {
     const bound = server.address()
     if (bound === null || typeof bound === 'string') {
-      // A string address means a pipe or Unix socket, which this server never binds.
       throw new Error('wirehttp: expected a TCP address after listen()')
     }
     return bound
   }
 
-  //Declares a variable to cache the "closing" promise, initially not set. This will be used to make sure the shutdown logic only ever runs once, even if close() gets called multiple times.
   let closing: Promise<void> | undefined
 
-  //Purpose: performs the actual work of stopping the server and disconnecting all clients.
   async function shutDown(): Promise<void> {
+    // `net.Server.close()` only stops accepting and then waits for open connections to end
+    // on their own. For a keep-alive HTTP server that is a hang, because an idle client
+    // has no reason to disconnect -- so this destroys what is open as well.
     if (!server.listening) {
-      for (const socket of sockets) socket.destroy()
+      for (const connection of open) connection.destroy('server-shutdown')
       return
     }
 
@@ -80,19 +76,18 @@ export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
       server.once('close', () => resolve())
     })
 
+    // Stop accepting first, so a connection cannot slip in behind the destroy loop.
     server.close()
-    for (const socket of sockets) {
-      socket.destroy()
-      sockets.delete(socket)
-    }
+    for (const connection of open) connection.destroy('server-shutdown')
 
     await closed
   }
 
   return {
     address: () => (server.listening ? addressOrThrow() : null),
+    connections: () => [...open],
     get connectionCount() {
-      return sockets.size
+      return open.size
     },
     get listening() {
       return server.listening
@@ -103,6 +98,9 @@ export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
         throw new Error('wirehttp: listen() called on a server that is already listening')
       }
 
+      // A failed bind arrives as an 'error' event, not as a throw from `listen()`. Both
+      // listeners are removed once one fires: leaving the error listener attached would
+      // mean a later server error resolved into an already-settled promise and vanished.
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error): void => {
           server.removeListener('listening', onListening)

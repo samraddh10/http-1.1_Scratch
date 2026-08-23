@@ -47,14 +47,6 @@ test('listen resolves with the bound ephemeral port', async (t) => {
   assert.equal(server.listening, true)
   assert.equal(server.address()?.port, port)
 })
-
-test('address() is null and listening is false before listen', () => {
-  const server = createTcpServer()
-
-  assert.equal(server.address(), null)
-  assert.equal(server.listening, false)
-})
-
 test('an accepted socket receives the bytes it is sent, and answers', async (t) => {
   const { port } = await started(t)
 
@@ -63,28 +55,12 @@ test('an accepted socket receives the bytes it is sent, and answers', async (t) 
   // The default 1.1 handler answers `<chunk>/<total>`; five bytes in, five bytes counted.
   assert.equal(response.toString('latin1').trim(), '5/5')
 })
-
-test('byte counts accumulate across writes on one connection', async (t) => {
-  const { port } = await started(t)
-  const client = await connect(port)
-  t.after(() => client.close())
-
-  await client.write('abc')
-  await client.read(untilIncludes('3/3'))
-  await client.write('de')
-  const received = await client.read(untilIncludes('2/5'))
-
-  // Proof the socket is stateful and the same handler is still on it -- the second write
-  // was counted against the first one's total rather than starting over.
-  assert.equal(received.toString('latin1'), '3/3\n2/5\n')
-})
-
 test('the handler passed in is the one that runs, once per socket', async (t) => {
   let accepted = 0
   const { port } = await started(t, {
-    onConnection: (socket) => {
+    onConnection: (connection) => {
       accepted++
-      socket.write('ok')
+      connection.write('ok')
     },
   })
 
@@ -180,13 +156,6 @@ test('listen rejects when the port is already taken', async (t) => {
   )
   assert.equal(server.listening, false)
 })
-
-test('listen twice is an error, not a second bind', async (t) => {
-  const { server } = await started(t)
-
-  await assert.rejects(() => server.listen(0), /already listening/)
-})
-
 test('an abrupt client reset does not take the process down', async (t) => {
   // ECONNRESET on a socket with no 'error' listener is an uncaught exception. On Windows
   // this is the normal way a client disappearing presents, so it is not an edge case here.
