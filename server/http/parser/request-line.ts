@@ -1,6 +1,7 @@
 // module 2.2  server/http/parser/request-line.ts -- method / target / version
 
 import { badRequest, notImplemented, versionNotSupported } from '../errors.js'
+import { isToken } from './tokens.js'
 
 export interface RequestLine {
   /** Case-sensitive, exactly as sent. */
@@ -22,31 +23,6 @@ const IMPLEMENTED = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS', 
 
 /** RFC 9112 section 2.3: HTTP-name "/" DIGIT "." DIGIT. One digit each, case-sensitive. */
 const VERSION = /^HTTP\/\d\.\d$/
-
-/** tchar, RFC 9110 section 5.6.2. */
-const TCHAR = (() => {
-  const table = new Uint8Array(256)
-  const mark = (from: number, to: number): void => {
-    for (let code = from; code <= to; code++) table[code] = 1
-  }
-  //marks 0–9 (ASCII codes 48–57) as valid.
-  mark(0x30, 0x39)
-  //marks A–Z (65–90) as valid.
-  mark(0x41, 0x5a)
-  //marks a–z (97–122) as valid.
-  mark(0x61, 0x7a)
-  for (const character of "!#$%&'*+-.^_`|~") table[character.charCodeAt(0)] = 1
-  return table
-})()
-
-//Purpose: Checks whether a whole string is a valid HTTP token — used to validate the method name.
-function isToken(value: string): boolean {
-  if (value.length === 0) return false
-  for (let i = 0; i < value.length; i++) {
-    if (TCHAR[value.charCodeAt(i)] !== 1) return false
-  }
-  return true
-}
 
 ///Purpose: Checks the request target (the path/query part) for bytes that must never appear there — control characters, space, and DEL. 
 // Note this function is named for what it rejects, and it deliberately does not reject bytes above 0x7f.

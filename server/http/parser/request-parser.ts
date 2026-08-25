@@ -2,6 +2,8 @@ import type { Config } from '../../config.js'
 import { config as defaultConfig } from '../../config.js'
 import { ByteBuffer } from '../../tcp/byte-buffer.js'
 import { ProtocolError, uriTooLong } from '../errors.js'
+import type { HeaderSet } from './headers.js'
+import { HeaderSection } from './headers.js'
 import type { RequestLine } from './request-line.js'
 import { parseRequestLine } from './request-line.js'
 import { State, assertTransition } from './states.js'
@@ -21,7 +23,16 @@ export const Step = {
 export type Step = (typeof Step)[keyof typeof Step]
 
 //Purpose: defines the two optional callback functions a caller can supply to be notified as parsing progresses, instead of the parser returning data directly.
+/**
+ * Everything known about a request before its body starts: the line, the fields, and from
+ * subphase 2.4 the framing decision made from them. This is the event module 5 builds a
+ * `ServerRequest` from.
+ */
+export interface RequestHead extends RequestLine, HeaderSet {}
+
 export interface ParserHandlers {
+  /** The header section is closed and the framing is decided; the body has not started. */
+  onHead?(head: RequestHead): void
   /** A run of body bytes. Called any number of times, including with one byte. */
   onBodyChunk?(chunk: Buffer): void
   /** One complete request has been read; the parser is ready for the next one. */
@@ -45,6 +56,7 @@ export class RequestParser {
   #state: State = State.RequestLine
   #error: ProtocolError | undefined
   #requestLine: RequestLine | undefined
+  #headers: HeaderSection
 
   /**
    * How far the current delimiter scan has already looked. Without it a client dribbling a
@@ -58,6 +70,7 @@ export class RequestParser {
     this.#config = options.config ?? defaultConfig
     this.#handlers = options
     this.#buffer = new ByteBuffer()
+    this.#headers = new HeaderSection(this.#config)
   }
 
   get state(): State {
@@ -159,7 +172,39 @@ export class RequestParser {
   }
 
   #stepHeaders(): Step {
-    return Step.NeedMore // subphase 2.3
+    const end = this.#buffer.indexOfCRLF(this.#scanned)
+
+    if (end === -1) {
+      this.#headers.guardPending(this.#buffer.length)
+      this.#scanned = Math.max(0, this.#buffer.length - 1)
+      return Step.NeedMore
+    }
+
+    if (end === 0) {
+      this.#buffer.consume(2)
+      this.#scanned = 0
+      this.#closeHead()
+      return Step.Advanced
+    }
+
+    // One line per step rather than a loop over all of them: the drive loop is the loop,
+    // and a step that returns after each line cannot leave a half-read line behind.
+    this.#headers.add(this.#buffer.toLatin1(0, end))
+    this.#buffer.consume(end + 2)
+    this.#scanned = 0
+    return Step.Advanced
+  }
+
+  #closeHead(): void {
+    const requestLine = this.#requestLine
+    if (requestLine === undefined) throw new Error('RequestParser: headers without a request line')
+
+    const head: RequestHead = { ...requestLine, ...this.#headers.finish(requestLine) }
+    this.#handlers.onHead?.(head)
+
+    // Subphase 2.4 decides framing here and goes to Body when there is one. Until then no
+    // request carries a body, which is correct for every GET and wrong for every POST.
+    this.#transition(State.Complete)
   }
 
   #stepBody(): Step {
@@ -170,6 +215,7 @@ export class RequestParser {
     this.#handlers.onComplete?.()
 
     this.#requestLine = undefined
+    this.#headers = new HeaderSection(this.#config)
     this.#scanned = 0
     // The buffer is deliberately left alone: whatever follows is the next pipelined
     // request, and the very next loop iteration starts reading it.

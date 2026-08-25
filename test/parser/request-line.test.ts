@@ -129,7 +129,9 @@ test('splitting between the CR and the LF does not lose the delimiter', () => {
 })
 
 test('exactly the line and its CRLF are consumed, and not one byte more', () => {
-  const rest = Buffer.from('Host: localhost\r\n', 'latin1')
+  // The tail has no CRLF, so the header reader cannot take any of it either: whatever is
+  // still buffered is exactly what the request line declined to consume.
+  const rest = Buffer.from('Host: localh', 'latin1')
   const parser = feed([Buffer.concat([LINE, rest])])
 
   assert.equal(parser.state, State.Headers)
