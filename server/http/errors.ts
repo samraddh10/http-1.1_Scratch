@@ -61,6 +61,11 @@ export function notImplemented(method: string): ProtocolError {
   return new ProtocolError(501, `method ${method} is not implemented`)
 }
 
+/** A transfer coding other than `chunked`. RFC 9112 section 6.1 asks for 501 by name. */
+export function unsupportedTransferCoding(coding: string): ProtocolError {
+  return new ProtocolError(501, `transfer coding ${coding} is not implemented`)
+}
+
 /** A version other than HTTP/1.0 or HTTP/1.1. */
 export function versionNotSupported(version: string): ProtocolError {
   return new ProtocolError(505, `version ${version} is not supported`)

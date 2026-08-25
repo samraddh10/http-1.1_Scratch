@@ -2,6 +2,9 @@ import type { Config } from '../../config.js'
 import { config as defaultConfig } from '../../config.js'
 import { ByteBuffer } from '../../tcp/byte-buffer.js'
 import { ProtocolError, uriTooLong } from '../errors.js'
+import { LengthBody } from './body.js'
+import type { Framing } from './framing.js'
+import { decideFraming } from './framing.js'
 import type { HeaderSet } from './headers.js'
 import { HeaderSection } from './headers.js'
 import type { RequestLine } from './request-line.js'
@@ -28,7 +31,10 @@ export type Step = (typeof Step)[keyof typeof Step]
  * subphase 2.4 the framing decision made from them. This is the event module 5 builds a
  * `ServerRequest` from.
  */
-export interface RequestHead extends RequestLine, HeaderSet {}
+export interface RequestHead extends RequestLine, HeaderSet {
+  /** How this request's body is delimited, decided from the fields above. */
+  readonly framing: Framing
+}
 
 export interface ParserHandlers {
   /** The header section is closed and the framing is decided; the body has not started. */
@@ -57,6 +63,8 @@ export class RequestParser {
   #error: ProtocolError | undefined
   #requestLine: RequestLine | undefined
   #headers: HeaderSection
+  #framing: Framing = { kind: 'none' }
+  #body: LengthBody | undefined
 
   /**
    * How far the current delimiter scan has already looked. Without it a client dribbling a
@@ -199,16 +207,40 @@ export class RequestParser {
     const requestLine = this.#requestLine
     if (requestLine === undefined) throw new Error('RequestParser: headers without a request line')
 
-    const head: RequestHead = { ...requestLine, ...this.#headers.finish(requestLine) }
-    this.#handlers.onHead?.(head)
+    const headerSet = this.#headers.finish(requestLine)
+    const framing = decideFraming(requestLine, headerSet.headers, this.#config)
 
-    // Subphase 2.4 decides framing here and goes to Body when there is one. Until then no
-    // request carries a body, which is correct for every GET and wrong for every POST.
-    this.#transition(State.Complete)
+    this.#framing = framing
+    this.#handlers.onHead?.({ ...requestLine, ...headerSet, framing })
+
+    if (framing.kind === 'none') {
+      this.#transition(State.Complete)
+      return
+    }
+
+    if (framing.kind === 'length') this.#body = new LengthBody(framing.length)
+    this.#transition(State.Body)
   }
 
   #stepBody(): Step {
-    return Step.NeedMore // subphases 2.4 and 2.5
+    if (this.#framing.kind === 'chunked') {
+      // Subphase 2.5 replaces this with the chunk sub-machine. Answering 501 in the meantime
+      // is wrong but honest: the alternative is a connection that stalls with no explanation.
+      throw new ProtocolError(501, 'chunked transfer coding is not implemented yet')
+    }
+
+    const body = this.#body
+    if (body === undefined) throw new Error('RequestParser: body state with no decoder')
+
+    if (body.finished) {
+      this.#transition(State.Complete)
+      return Step.Advanced
+    }
+
+    if (this.#buffer.length === 0) return Step.NeedMore
+
+    this.#handlers.onBodyChunk?.(body.take(this.#buffer))
+    return Step.Advanced
   }
 
   #stepComplete(): Step {
@@ -216,6 +248,8 @@ export class RequestParser {
 
     this.#requestLine = undefined
     this.#headers = new HeaderSection(this.#config)
+    this.#framing = { kind: 'none' }
+    this.#body = undefined
     this.#scanned = 0
     // The buffer is deliberately left alone: whatever follows is the next pipelined
     // request, and the very next loop iteration starts reading it.
