@@ -15,9 +15,11 @@ import {
 } from '../../server/http/errors.js'
 import { RequestParser } from '../../server/http/parser/request-parser.js'
 import { State, assertTransition, canTransition } from '../../server/http/parser/states.js'
-import { crlf, splitStrategies } from '../helpers/feed-bytes.js'
+import { splitStrategies } from '../helpers/feed-bytes.js'
 
-const REQUEST = crlf('GET /health HTTP/1.1', 'Host: localhost:3000', '')
+// No CRLF anywhere: the machine cannot advance off REQUEST_LINE, so what is under test is
+// the accumulation contract on its own rather than anything subphase 2.2 parses.
+const PARTIAL = Buffer.from('GET /health HTTP/1.1', 'latin1')
 
 test('ProtocolError carries the status, the reason and the close-after flag', () => {
   const error = new ProtocolError(400, 'space before colon in header name')
@@ -88,14 +90,14 @@ test('bytes accumulate however they are split, and none are consumed', () => {
     const parser = new RequestParser()
     let fed = 0
 
-    for (const chunk of strategy.split(REQUEST)) {
+    for (const chunk of strategy.split(PARTIAL)) {
       parser.push(chunk)
       fed += chunk.length
       assert.equal(parser.buffered, fed, strategy.name)
       assert.equal(parser.state, State.RequestLine, strategy.name)
     }
 
-    assert.equal(parser.buffered, REQUEST.length, strategy.name)
+    assert.equal(parser.buffered, PARTIAL.length, strategy.name)
   }
 })
 

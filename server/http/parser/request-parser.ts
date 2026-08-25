@@ -1,9 +1,9 @@
-// module 2.1  server/http/parser/request-parser.ts -- the state machine; push(chunk) -> events
-
 import type { Config } from '../../config.js'
 import { config as defaultConfig } from '../../config.js'
 import { ByteBuffer } from '../../tcp/byte-buffer.js'
 import { ProtocolError, uriTooLong } from '../errors.js'
+import type { RequestLine } from './request-line.js'
+import { parseRequestLine } from './request-line.js'
 import { State, assertTransition } from './states.js'
 
 /**
@@ -20,6 +20,7 @@ export const Step = {
 
 export type Step = (typeof Step)[keyof typeof Step]
 
+//Purpose: defines the two optional callback functions a caller can supply to be notified as parsing progresses, instead of the parser returning data directly.
 export interface ParserHandlers {
   /** A run of body bytes. Called any number of times, including with one byte. */
   onBodyChunk?(chunk: Buffer): void
@@ -32,15 +33,10 @@ export interface RequestParserOptions extends ParserHandlers {
   config?: Config
 }
 
-/**
- * Turns an arbitrarily chunked byte stream into requests.
- *
- * The contract that everything else rests on: `push()` may be called with any number of
- * bytes, including a single byte or none of use, and the parser answers either by
- * advancing or by keeping every byte it was given and waiting. It is not "one call, one
- * request" in either direction -- one push can complete two pipelined requests, and one
- * request can take a hundred pushes.
- */
+//The doc comment above the class states its core contract plainly: push() can be called with any number of bytes — including zero useful bytes, or just one byte 
+// — and after each call the parser has either advanced (made progress reading the request) or is waiting, having kept every byte it was given. It is explicitly 
+// not a one-call-per-request design in either direction: a single push() call might contain enough bytes to complete two pipelined requests at once,
+//  while a single request might take a hundred separate push() calls to fully arrive (for instance, over a slow connection).
 export class RequestParser {
   readonly #config: Config
   readonly #handlers: ParserHandlers
@@ -48,7 +44,16 @@ export class RequestParser {
 
   #state: State = State.RequestLine
   #error: ProtocolError | undefined
+  #requestLine: RequestLine | undefined
 
+  /**
+   * How far the current delimiter scan has already looked. Without it a client dribbling a
+   * long line one byte at a time costs O(n^2) work for O(n) bytes, which is the cheap
+   * version of the header-bomb attack.
+   */
+  #scanned = 0
+
+  //Purpose: set up a fresh parser instance, ready to start reading a request line.
   constructor(options: RequestParserOptions = {}) {
     this.#config = options.config ?? defaultConfig
     this.#handlers = options
@@ -69,11 +74,15 @@ export class RequestParser {
     return this.#error
   }
 
-  /**
-   * Feeds bytes in. Returns normally when the parser needs more; throws a `ProtocolError`
-   * carrying the status and the close-or-not flag when the input cannot be interpreted.
-   */
+  /** The in-flight request's line, once it has been read. Undefined between requests. */
+  get requestLine(): RequestLine | undefined {
+    return this.#requestLine
+  }
+
+  //Purpose: the single entry point for feeding newly-arrived bytes into the parser. 
+  // This is the method the connection-handling code calls every time more data arrives on the socket.
   push(chunk: Buffer): void {
+    //checks whether this parser has already failed on a previous call.
     if (this.#error !== undefined) {
       throw new Error(
         `RequestParser: push() after ${this.#error.message}; the connection must close`,
@@ -84,6 +93,8 @@ export class RequestParser {
     this.#drive()
   }
 
+  //Purpose: repeatedly attempts to process the buffered bytes, one state-step at a time, for as long as each step keeps making progress. 
+  // If a step throws a ProtocolError, this method records it and moves the parser into the Error state before letting the error continue propagating up to whoever called push().
   #drive(): void {
     try {
       while (this.#step() === Step.Advanced) {
@@ -98,6 +109,7 @@ export class RequestParser {
     }
   }
 
+  //Purpose: looks at the parser's current state and delegates to whichever private method handles that specific state, returning whatever that method returns.
   #step(): Step {
     switch (this.#state) {
       case State.RequestLine:
@@ -113,6 +125,7 @@ export class RequestParser {
     }
   }
 
+  //Purpose: the only place in this class allowed to change #state, and it always checks legality first.
   #transition(to: State): void {
     assertTransition(this.#state, to)
     this.#state = to
@@ -120,12 +133,29 @@ export class RequestParser {
 
   // -- states ----------------------------------------------------------------------------
 
+  //Purpose: look at the bytes currently buffered and try to find a complete request line — bytes up to and including a CRLF (\r\n). If the CRLF hasn't arrived yet, decide whether to keep waiting or give up because the line is already too long.
   #stepRequestLine(): Step {
-    // Subphase 2.2 finds the CRLF and splits the line here. Until then the only thing this
-    // state can decide is that the line has already run too long to be one, which is the
-    // check that keeps a client dribbling bytes with no delimiter from buffering forever.
-    if (this.#buffer.length > this.#config.maxRequestLineBytes) throw uriTooLong()
-    return Step.NeedMore
+    const end = this.#buffer.indexOfCRLF(this.#scanned)
+
+    if (end === -1) {
+      // No delimiter yet. Refusing here rather than on the finished line is the point: it
+      // is what stops a client that never sends a CRLF from buffering without bound.
+      if (this.#buffer.length > this.#config.maxRequestLineBytes) throw uriTooLong()
+      // Resume one byte back: the CR may be the last byte held and its LF in the next chunk.
+      this.#scanned = Math.max(0, this.#buffer.length - 1)
+      return Step.NeedMore
+    }
+
+    if (end > this.#config.maxRequestLineBytes) throw uriTooLong()
+
+    // Parse before consuming, so a refused line is still in the buffer for module 3 to log.
+    const parsed = parseRequestLine(this.#buffer.toLatin1(0, end))
+
+    this.#buffer.consume(end + 2)
+    this.#scanned = 0
+    this.#requestLine = parsed
+    this.#transition(State.Headers)
+    return Step.Advanced
   }
 
   #stepHeaders(): Step {
@@ -138,6 +168,9 @@ export class RequestParser {
 
   #stepComplete(): Step {
     this.#handlers.onComplete?.()
+
+    this.#requestLine = undefined
+    this.#scanned = 0
     // The buffer is deliberately left alone: whatever follows is the next pipelined
     // request, and the very next loop iteration starts reading it.
     this.#transition(State.RequestLine)
