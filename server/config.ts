@@ -67,6 +67,16 @@ export interface Config {
    */
   maxChunkSizeBytes: number
 
+  /**
+   * Maximum length of one chunk-size line -- the hex size and any `;ext` after it.
+   *
+   * Distinct from `maxChunkSizeBytes`, which bounds the chunk's data. This one bounds the
+   * line that announces it: a client can open a size line and never send its CRLF, and
+   * without a cap the server buffers that forever. It is the header bomb again, in the
+   * body. Exceeding it is 400.
+   */
+  maxChunkLineBytes: number
+
   // -- Metrics (module 7) --------------------------------------------------------------
 
   /** How many recent requests the ring buffer keeps for the dashboard's inspector panel. */
@@ -93,6 +103,7 @@ export const defaults: Config = {
   maxHeaderBytes: 16_384,
   maxBodyBytes: 1_048_576,
   maxChunkSizeBytes: 1_048_576,
+  maxChunkLineBytes: 1_024,
 
   recentRequestsBufferSize: 50,
   metricsIntervalMs: 500,
@@ -148,6 +159,7 @@ export function loadConfig(env: Env = process.env, base: Config = defaults): Con
     maxHeaderBytes: positiveInt(env, 'maxHeaderBytes', base.maxHeaderBytes),
     maxBodyBytes: positiveInt(env, 'maxBodyBytes', base.maxBodyBytes),
     maxChunkSizeBytes: positiveInt(env, 'maxChunkSizeBytes', base.maxChunkSizeBytes),
+    maxChunkLineBytes: positiveInt(env, 'maxChunkLineBytes', base.maxChunkLineBytes),
 
     recentRequestsBufferSize: positiveInt(
       env,

@@ -2,28 +2,15 @@ import type { Config } from '../../config.js'
 import { config as defaultConfig } from '../../config.js'
 import { ByteBuffer } from '../../tcp/byte-buffer.js'
 import { ProtocolError, uriTooLong } from '../errors.js'
-import { LengthBody } from './body.js'
+import type { BodyDecoder } from './body.js'
+import { ChunkedBody, LengthBody } from './body.js'
 import type { Framing } from './framing.js'
 import { decideFraming } from './framing.js'
 import type { HeaderSet } from './headers.js'
 import { HeaderSection } from './headers.js'
 import type { RequestLine } from './request-line.js'
 import { parseRequestLine } from './request-line.js'
-import { State, assertTransition } from './states.js'
-
-/**
- * What one state step reports back to the drive loop.
- *
- * `NeedMore` carries an obligation: a step that returns it must have consumed nothing, so
- * that the next chunk sees the same bytes plus more. Half-consuming and then asking for
- * more bytes is how a parser loses a field boundary.
- */
-export const Step = {
-  Advanced: 'advanced',
-  NeedMore: 'need-more',
-} as const
-
-export type Step = (typeof Step)[keyof typeof Step]
+import { State, Step, assertTransition } from './states.js'
 
 //Purpose: defines the two optional callback functions a caller can supply to be notified as parsing progresses, instead of the parser returning data directly.
 /**
@@ -36,13 +23,18 @@ export interface RequestHead extends RequestLine, HeaderSet {
   readonly framing: Framing
 }
 
+const EMPTY_TRAILERS: Readonly<Record<string, string>> = Object.freeze({})
+
 export interface ParserHandlers {
   /** The header section is closed and the framing is decided; the body has not started. */
   onHead?(head: RequestHead): void
   /** A run of body bytes. Called any number of times, including with one byte. */
   onBodyChunk?(chunk: Buffer): void
-  /** One complete request has been read; the parser is ready for the next one. */
-  onComplete?(): void
+  /**
+   * One complete request has been read; the parser is ready for the next one. `trailers` is
+   * empty unless a chunked body sent a trailer section.
+   */
+  onComplete?(trailers: Readonly<Record<string, string>>): void
 }
 
 export interface RequestParserOptions extends ParserHandlers {
@@ -64,7 +56,7 @@ export class RequestParser {
   #requestLine: RequestLine | undefined
   #headers: HeaderSection
   #framing: Framing = { kind: 'none' }
-  #body: LengthBody | undefined
+  #body: BodyDecoder | undefined
 
   /**
    * How far the current delimiter scan has already looked. Without it a client dribbling a
@@ -218,17 +210,12 @@ export class RequestParser {
       return
     }
 
-    if (framing.kind === 'length') this.#body = new LengthBody(framing.length)
+    this.#body =
+      framing.kind === 'length' ? new LengthBody(framing.length) : new ChunkedBody(this.#config)
     this.#transition(State.Body)
   }
 
   #stepBody(): Step {
-    if (this.#framing.kind === 'chunked') {
-      // Subphase 2.5 replaces this with the chunk sub-machine. Answering 501 in the meantime
-      // is wrong but honest: the alternative is a connection that stalls with no explanation.
-      throw new ProtocolError(501, 'chunked transfer coding is not implemented yet')
-    }
-
     const body = this.#body
     if (body === undefined) throw new Error('RequestParser: body state with no decoder')
 
@@ -237,14 +224,12 @@ export class RequestParser {
       return Step.Advanced
     }
 
-    if (this.#buffer.length === 0) return Step.NeedMore
-
-    this.#handlers.onBodyChunk?.(body.take(this.#buffer))
-    return Step.Advanced
+    return body.step(this.#buffer, (chunk) => this.#handlers.onBodyChunk?.(chunk))
   }
 
   #stepComplete(): Step {
-    this.#handlers.onComplete?.()
+    // Read before the reset below: the trailers belong to the request being completed.
+    this.#handlers.onComplete?.(this.#body?.trailers ?? EMPTY_TRAILERS)
 
     this.#requestLine = undefined
     this.#headers = new HeaderSection(this.#config)

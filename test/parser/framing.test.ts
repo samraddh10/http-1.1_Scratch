@@ -78,12 +78,10 @@ test('Content-Length gives a length framing, and zero means no body at all', () 
 })
 
 test('Transfer-Encoding: chunked gives a chunked framing', () => {
-  const heads: RequestHead[] = []
-  const parser = new RequestParser({ onHead: (head) => void heads.push(head) })
+  const { heads, parser } = run([post('Transfer-Encoding: chunked')])
 
-  // The decoder itself lands in 2.5; the decision is what 2.4 owns.
-  assert.throws(() => parser.push(post('Transfer-Encoding: chunked')), ProtocolError)
   assert.deepEqual(heads[0]?.framing, { kind: 'chunked' })
+  assert.equal(parser.state, State.Body, 'the head is closed and the body is waited on')
 })
 
 // -- the smuggling rule -----------------------------------------------------------------------

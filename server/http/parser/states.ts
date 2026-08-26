@@ -29,3 +29,20 @@ export function assertTransition(from: State, to: State): void {
     throw new Error(`RequestParser: illegal transition ${from} -> ${to}`)
   }
 }
+
+/**
+ * What one step reports back to the drive loop.
+ *
+ * `NeedMore` carries an obligation: a step that returns it must have consumed nothing, so
+ * that the next chunk sees the same bytes plus more. Half-consuming and then asking for
+ * more bytes is how a parser loses a field boundary.
+ *
+ * It lives here rather than beside the drive loop because the body decoders report with it
+ * too, and importing it from the parser they are imported by would be a cycle.
+ */
+export const Step = {
+  Advanced: 'advanced',
+  NeedMore: 'need-more',
+} as const
+
+export type Step = (typeof Step)[keyof typeof Step]
