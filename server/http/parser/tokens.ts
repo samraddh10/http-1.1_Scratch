@@ -40,12 +40,18 @@ export function trimOWS(value: string): string {
  * (RFC 9110 section 5.5). Everything below SP except HTAB, and DEL, is refused: a CR or LF
  * smuggled into a value is a response-splitting or request-splitting primitive, and NUL
  * ends the string for anything downstream written in C.
+ *
+ * Anything above 0xff is refused for the same reason one step later. Request bytes are
+ * decoded latin1 so they cannot reach here, but module 3 runs this over strings an
+ * application supplied, and a field value goes onto the wire as latin1: U+010A would
+ * encode to 0x0A and split the response, having passed a check that only looked at the
+ * code point.
  */
 export function hasForbiddenFieldByte(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i)
     if (code === 0x09) continue
-    if (code < 0x20 || code === 0x7f) return true
+    if (code < 0x20 || code === 0x7f || code > 0xff) return true
   }
   return false
 }
