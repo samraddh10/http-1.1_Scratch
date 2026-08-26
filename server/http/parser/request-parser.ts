@@ -10,6 +10,8 @@ import type { HeaderSet } from './headers.js'
 import { HeaderSection } from './headers.js'
 import type { RequestLine } from './request-line.js'
 import { parseRequestLine } from './request-line.js'
+import type { Target } from './target.js'
+import { parseTarget } from './target.js'
 import { State, Step, assertTransition } from './states.js'
 
 //Purpose: defines the two optional callback functions a caller can supply to be notified as parsing progresses, instead of the parser returning data directly.
@@ -21,6 +23,10 @@ import { State, Step, assertTransition } from './states.js'
 export interface RequestHead extends RequestLine, HeaderSet {
   /** How this request's body is delimited, decided from the fields above. */
   readonly framing: Framing
+  /** The percent-decoded path. `target` stays raw, and is what `req.url` becomes. */
+  readonly path: string
+  /** The query string without its `?`, still encoded for Express's query parser. */
+  readonly query: string
 }
 
 const EMPTY_TRAILERS: Readonly<Record<string, string>> = Object.freeze({})
@@ -54,6 +60,7 @@ export class RequestParser {
   #state: State = State.RequestLine
   #error: ProtocolError | undefined
   #requestLine: RequestLine | undefined
+  #target: Target | undefined
   #headers: HeaderSection
   #framing: Framing = { kind: 'none' }
   #body: BodyDecoder | undefined
@@ -90,6 +97,11 @@ export class RequestParser {
   /** The in-flight request's line, once it has been read. Undefined between requests. */
   get requestLine(): RequestLine | undefined {
     return this.#requestLine
+  }
+
+  /** The in-flight request's target, taken apart. Undefined between requests. */
+  get target(): Target | undefined {
+    return this.#target
   }
 
   //Purpose: the single entry point for feeding newly-arrived bytes into the parser. 
@@ -163,10 +175,12 @@ export class RequestParser {
 
     // Parse before consuming, so a refused line is still in the buffer for module 3 to log.
     const parsed = parseRequestLine(this.#buffer.toLatin1(0, end))
+    const target = parseTarget(parsed.target, parsed.method)
 
     this.#buffer.consume(end + 2)
     this.#scanned = 0
     this.#requestLine = parsed
+    this.#target = target
     this.#transition(State.Headers)
     return Step.Advanced
   }
@@ -199,11 +213,26 @@ export class RequestParser {
     const requestLine = this.#requestLine
     if (requestLine === undefined) throw new Error('RequestParser: headers without a request line')
 
+    const target = this.#target
+    if (target === undefined) throw new Error('RequestParser: headers without a target')
+
     const headerSet = this.#headers.finish(requestLine)
+
+    // RFC 9112 section 3.2.2: an origin server given an absolute-form target MUST use the
+    // authority from the target and ignore the Host field. Two sources naming the host is
+    // the same disagreement the framing rules refuse; here the RFC names which one wins.
+    if (target.authority !== undefined) headerSet.headers['host'] = target.authority
+
     const framing = decideFraming(requestLine, headerSet.headers, this.#config)
 
     this.#framing = framing
-    this.#handlers.onHead?.({ ...requestLine, ...headerSet, framing })
+    this.#handlers.onHead?.({
+      ...requestLine,
+      ...headerSet,
+      framing,
+      path: target.path,
+      query: target.query,
+    })
 
     if (framing.kind === 'none') {
       this.#transition(State.Complete)
@@ -232,6 +261,7 @@ export class RequestParser {
     this.#handlers.onComplete?.(this.#body?.trailers ?? EMPTY_TRAILERS)
 
     this.#requestLine = undefined
+    this.#target = undefined
     this.#headers = new HeaderSection(this.#config)
     this.#framing = { kind: 'none' }
     this.#body = undefined
