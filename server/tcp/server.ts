@@ -32,6 +32,7 @@ export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
 
   const handlers: ConnectionOptions = {
     onData: options.onData ?? echoByteCounts,
+    ...(options.onTimeout === undefined ? {} : { onTimeout: options.onTimeout }),
     onClose: (connection, reason) => {
       open.delete(connection)
       options.onClose?.(connection, reason)

@@ -20,6 +20,12 @@ export interface ConnectionHandlers {
   onData?(connection: Connection, chunk: Buffer): void
   //onClose — called when the connection ends, passing the Connection and the reason it closed
   onClose?(connection: Connection, reason: CloseReason): void
+  /**
+   * Called when the socket has been idle for the whole timeout. Without a handler the
+   * connection is destroyed; with one, the handler decides -- module 4 writes a 408 and
+   * closes, which is the only way a client can tell a timeout from a network failure.
+   */
+  onTimeout?(connection: Connection): void
 }
 
 export interface ConnectionOptions extends ConnectionHandlers {
@@ -44,6 +50,7 @@ export class Connection {
   error: Error | undefined
 
   readonly #handlers: ConnectionHandlers
+  readonly #idleTimeoutMs: number
   #drainWaiters: { resolve: () => void; reject: (error: Error) => void }[] = []
   #closeIntent: CloseReason | undefined
 
@@ -55,14 +62,15 @@ export class Connection {
     this.openedAt = now
     this.lastActivityAt = now
     this.#handlers = options
+    this.#idleTimeoutMs = options.idleTimeoutMs ?? config.idleTimeoutMs
 
     //This tells the socket: "if no data is sent or received for ms milliseconds, emit a 'timeout' event."
-    socket.setTimeout(options.idleTimeoutMs ?? config.idleTimeoutMs)
+    socket.setTimeout(this.#idleTimeoutMs)
 
     //Whenever the client sends data, Node fires a 'data' event on the socket with the bytes as a Buffer
     socket.on('data', (chunk: Buffer) => this.#receive(chunk))
     socket.on('drain', () => this.#drained())
-    socket.on('timeout', () => this.destroy('idle-timeout'))
+    socket.on('timeout', () => this.#timedOut())
 
     // After end() the peer answers our FIN with its own, so the last event to arrive is a
     // normal client disconnect and would otherwise be reported as one. Both of these are
@@ -125,6 +133,23 @@ export class Connection {
 
   resume(): void {
     if (!this.closed) this.socket.resume()
+  }
+
+  /**
+   * Restarts the idle timer, and its counterpart stops it.
+   *
+   * Module 4 disarms it while an application is working on a request that has already been
+   * read in full. The timeout exists to reclaim a connection whose CLIENT has gone quiet,
+   * and a socket that is silent because the server has not answered yet is the opposite
+   * case: timing that one out would kill every route slower than the limit and report the
+   * server's own latency to the client as its fault.
+   */
+  armIdleTimeout(): void {
+    if (!this.closed) this.socket.setTimeout(this.#idleTimeoutMs)
+  }
+
+  disarmIdleTimeout(): void {
+    if (!this.closed) this.socket.setTimeout(0)
   }
 
   /**
@@ -202,6 +227,20 @@ export class Connection {
 
     this.#settleDrainWaiters(new Error(`wirehttp: connection closed (${reason})`))
     this.#handlers.onClose?.(this, reason)
+  }
+
+  #timedOut(): void {
+    if (this.closed) return
+
+    // A timeout after end() is the flush itself stalling: the peer stopped reading, so the
+    // response explaining the close will never arrive and there is nothing to write. This
+    // is the second firing of the timer, and the only thing that reclaims the socket.
+    if (this.#closeIntent !== undefined || this.#handlers.onTimeout === undefined) {
+      this.destroy('idle-timeout')
+      return
+    }
+
+    this.#handlers.onTimeout(this)
   }
 
   #receive(chunk: Buffer): void {

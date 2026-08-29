@@ -70,3 +70,16 @@ export function unsupportedTransferCoding(coding: string): ProtocolError {
 export function versionNotSupported(version: string): ProtocolError {
   return new ProtocolError(505, `version ${version} is not supported`)
 }
+
+/**
+ * No complete request arrived before the idle timeout expired.
+ *
+ * RFC 9110 section 15.5.9: the server did not receive a complete request within the time it
+ * was prepared to wait, and a 408 implies the connection is closing rather than waiting on.
+ * Writing it before the close is what lets a client tell a deliberate timeout apart from a
+ * network failure -- a bare FIN looks the same as a broken path, and a client that cannot
+ * tell them apart cannot know whether retrying is safe.
+ */
+export function requestTimeout(reason: string): ProtocolError {
+  return new ProtocolError(408, reason)
+}

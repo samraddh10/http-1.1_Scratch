@@ -10,11 +10,11 @@
 import type { Config } from '../config.js'
 import type { Connection } from '../tcp/connection.js'
 import type { TcpServerOptions } from '../tcp/server.js'
-import { ProtocolError } from './errors.js'
+import { ProtocolError, requestTimeout } from './errors.js'
 import { decidePersistence } from './keep-alive.js'
 import type { RequestHead, RequestParserOptions } from './parser/request-parser.js'
 import { RequestParser } from './parser/request-parser.js'
-import { respondToProtocolError } from './response/error-response.js'
+import { respondToProtocolError, writeErrorResponse } from './response/error-response.js'
 import { ResponseWriter, type ResponseWriterOptions } from './response/writer.js'
 
 const NO_TRAILERS: Readonly<Record<string, string>> = Object.freeze({})
@@ -199,16 +199,58 @@ export class HttpConnection {
   }
 
   /**
-   * Stops reading while a response is outstanding and no request is mid-read, because every
-   * further byte then starts a request that cannot be answered until the queue drains.
-   * Parse-ahead within one socket read is still allowed, which is what keeps a pipelining
-   * client's next request ready the moment the current response ends.
+   * The one place that answers "is the server waiting on the client, or on the application?",
+   * because reading and timing out are the same question asked twice.
+   *
+   * Waiting on the application means the request has been read to its end and its response
+   * has not been written. Nothing more can be read -- every further byte starts a request
+   * that cannot be answered until the queue drains -- and nothing should be timed out
+   * either, since the silence is the server's own latency rather than an idle client.
+   *
+   * Every other state is waiting on the client: idle between requests, or a request still
+   * arriving. Both read and both time out, which is what catches a client dribbling a
+   * request out one byte at a time. Parse-ahead within one socket read stays allowed, so a
+   * pipelining client's next request is ready the moment the current response ends.
    */
   #throttle(): void {
     if (this.#closing) return
 
-    if (this.#reading === undefined && this.#queue.length > 0) this.#tcp.pause()
-    else this.#tcp.resume()
+    if (this.#reading === undefined && this.#queue.length > 0) {
+      this.#tcp.pause()
+      this.#tcp.disarmIdleTimeout()
+    } else {
+      this.#tcp.resume()
+      this.#tcp.armIdleTimeout()
+    }
+  }
+
+  /**
+   * The idle timeout expired while the server was waiting on the client -- `#throttle` does
+   * not leave the timer armed in any other state.
+   */
+  timedOut(): void {
+    if (this.#closing) return
+    this.#closing = true
+
+    // A response already on the wire has taken the only status line there is, so the timeout
+    // cannot be reported: this is a client that stopped reading mid-response, not one that
+    // failed to finish a request, and the bytes it is owed will never be acknowledged.
+    if (this.#queue[0]?.response.headersSent === true) {
+      this.#tcp.destroy('idle-timeout')
+      return
+    }
+
+    // The two cases the timer catches, told apart by whether any of a request arrived. The
+    // second is the slowloris: a connection held open by a byte every few seconds, costing
+    // the attacker nothing and the server a connection slot.
+    const partial = this.#reading !== undefined || this.#parser.buffered > 0
+    const error = requestTimeout(
+      partial ? 'an incomplete request stalled' : 'no request arrived before the idle timeout',
+    )
+
+    const method = this.#reading?.head.method
+    writeErrorResponse(this.#tcp, error, method === undefined ? {} : { method })
+    this.#tcp.end('idle-timeout')
   }
 
   //Called when the parser detects an invalid HTTP request. It sends an error response if it is still safe to do so; otherwise, it simply closes the connection.
@@ -250,6 +292,9 @@ export function serveHttp(options: HttpConnectionOptions): TcpServerOptions {
   return {
     onConnection: (connection) => {
       sessions.set(connection, new HttpConnection(connection, options))
+    },
+    onTimeout: (connection) => {
+      sessions.get(connection)?.timedOut()
     },
     onData: (connection, chunk) => {
       sessions.get(connection)?.receive(chunk)
