@@ -1,10 +1,8 @@
-// module 3.1-3.2  server/http/response/writer.ts -- status line, headers, framing
-//
-// 3.3 adds the bodyless rules to this file.
+// module 3.1-3.3  server/http/response/writer.ts -- status line, headers, framing, bodyless rules
 
 import { config } from '../../config.js'
 import { hasForbiddenFieldByte, isToken, trimOWS } from '../parser/tokens.js'
-import { isInformational, isValidStatus, reasonPhrase } from './status.js'
+import { forbidsContent, isInformational, isValidStatus, reasonPhrase } from './status.js'
 
 /** A number is accepted because Content-Length is one everywhere it is produced. */
 export type HeaderValue = string | number | readonly string[]
@@ -18,11 +16,15 @@ export type OutgoingHeaders = Readonly<Record<string, HeaderValue>>
  * `close` is the option a request never has: with no Content-Length and no chunked coding
  * available, the end of the body is the end of the connection. It is the HTTP/1.0 fallback,
  * and it costs the connection -- which is what chunked was added to 1.1 to avoid.
+ *
+ * `none` is the absence of framing rather than a kind of it: the body is over at the empty
+ * line and no header describes it.
  */
 export type ResponseFraming =
   | { readonly kind: 'length'; readonly length: number }
   | { readonly kind: 'chunked' }
   | { readonly kind: 'close' }
+  | { readonly kind: 'none' }
 
 export interface ResponseHead {
   readonly status: number
@@ -92,6 +94,8 @@ function firstValue(headers: OutgoingHeaders, wanted: string): string | undefine
 }
 
 export interface FramingContext {
+  /** The status being sent. 1xx, 204 and 304 are framed by the empty line and nothing else. */
+  readonly status?: number
   /** Length of the whole body when it is in hand at head time; absent when it is not. */
   readonly knownLength?: number
   /** The client's version. HTTP/1.0 has no chunked coding. */
@@ -111,6 +115,11 @@ export function decideResponseFraming(
   headers: OutgoingHeaders,
   context: FramingContext = {},
 ): ResponseFraming {
+  // Checked before the header fields, not after them: RFC 9112 section 6.3 makes the status
+  // the first rule of response framing, so a Content-Length on a 204 is not a conflict to
+  // resolve -- it is a field with nothing to describe, and it does not go out.
+  if (context.status !== undefined && forbidsContent(context.status)) return { kind: 'none' }
+
   const transferEncoding = firstValue(headers, 'transfer-encoding')
   const contentLength = firstValue(headers, 'content-length')
   const httpVersion = context.httpVersion ?? '1.1'
@@ -195,6 +204,8 @@ export function serialiseHead(head: ResponseHead, options: SerialiseOptions = {}
   }
 
   const framing = head.framing
+  const bodyless = framing?.kind === 'none'
+
   if (framing?.kind === 'length' && !supplied.has('content-length')) {
     text += `Content-Length: ${framing.length}\r\n`
   } else if (framing?.kind === 'chunked' && !supplied.has('transfer-encoding')) {
@@ -202,6 +213,12 @@ export function serialiseHead(head: ResponseHead, options: SerialiseOptions = {}
   }
 
   for (const [name, value] of Object.entries(head.headers ?? {})) {
+    // A framing header an application set on a 204 or a 304 is dropped rather than passed
+    // through. Everything else it set is kept -- a 304's ETag and Cache-Control are the
+    // point of the response.
+    const lower = name.toLowerCase()
+    if (bodyless && (lower === 'content-length' || lower === 'transfer-encoding')) continue
+
     if (typeof value === 'string' || typeof value === 'number') {
       text += fieldLine(name, String(value))
     } else {
@@ -216,6 +233,13 @@ export interface ResponseWriterOptions {
   readonly serverName?: string
   /** The requesting client's version. HTTP/1.0 gets a close-delimited body, not chunked. */
   readonly httpVersion?: '1.0' | '1.1'
+  /**
+   * The request's method. A HEAD response carries the full header block the equivalent GET
+   * would have carried -- Content-Length included, describing a body that is not sent --
+   * and then stops. Suppressing the header instead would remove the only reason to send a
+   * HEAD at all.
+   */
+  readonly method?: string
 }
 
 /**
@@ -246,6 +270,7 @@ export class ResponseWriter {
   #framing: ResponseFraming | undefined
   #headersSent = false
   #finished = false
+  #bodyAllowed = true
   #bodyBytesWritten = 0
 
   constructor(sink: ByteSink, options: ResponseWriterOptions = {}) {
@@ -266,9 +291,19 @@ export class ResponseWriter {
     return this.#framing
   }
 
-  /** Body bytes handed to `write()` and `end()`, before any chunk encoding. */
+  /** Body bytes put on the wire, before any chunk encoding. Zero for a bodyless response. */
   get bodyBytesWritten(): number {
     return this.#bodyBytesWritten
+  }
+
+  /**
+   * False once this response has been settled as one that carries no body -- a HEAD, a 204,
+   * a 304 or an interim. Body bytes handed to `write()` and `end()` are then discarded
+   * rather than refused, because Express calls `res.end(body)` on a HEAD request without
+   * knowing it is one, and Node swallows it exactly the same way.
+   */
+  get bodyAllowed(): boolean {
+    return this.#bodyAllowed
   }
 
   /**
@@ -311,12 +346,17 @@ export class ResponseWriter {
     if (body !== undefined && body.length > 0) accepted = this.#writeBody(body)
 
     const framing = this.#framing
-    if (framing?.kind === 'length' && this.#bodyBytesWritten !== framing.length) {
-      throw new Error(
-        `wirehttp: response declared Content-Length ${framing.length} but sent ${this.#bodyBytesWritten}`,
-      )
+    // Both of these describe a body, so neither applies when there is not one: the declared
+    // length belongs to the GET this HEAD is asking about, and the terminal chunk is the
+    // last thing in a body rather than a thing that follows one.
+    if (this.#bodyAllowed) {
+      if (framing?.kind === 'length' && this.#bodyBytesWritten !== framing.length) {
+        throw new Error(
+          `wirehttp: response declared Content-Length ${framing.length} but sent ${this.#bodyBytesWritten}`,
+        )
+      }
+      if (framing?.kind === 'chunked') accepted = this.#sink.write(LAST_CHUNK)
     }
-    if (framing?.kind === 'chunked') accepted = this.#sink.write(LAST_CHUNK)
 
     this.#finished = true
     return accepted
@@ -325,12 +365,14 @@ export class ResponseWriter {
   #sendHead(head: ResponseHead): boolean {
     if (this.#headersSent) throw new Error('wirehttp: writeHead() called twice on one response')
 
-    const { httpVersion, serverName } = this.#options
-    const context: FramingContext = httpVersion === undefined ? {} : { httpVersion }
+    const { httpVersion, serverName, method } = this.#options
+    const context: { status: number; httpVersion?: '1.0' | '1.1' } = { status: head.status }
+    if (httpVersion !== undefined) context.httpVersion = httpVersion
 
     const framing = head.framing ?? decideResponseFraming(head.headers ?? {}, context)
     this.#framing = framing
     this.#headersSent = true
+    this.#bodyAllowed = framing.kind !== 'none' && method?.toUpperCase() !== 'HEAD'
 
     const options: SerialiseOptions = serverName === undefined ? {} : { serverName }
 
@@ -338,6 +380,8 @@ export class ResponseWriter {
   }
 
   #writeBody(body: Buffer): boolean {
+    if (!this.#bodyAllowed) return true
+
     const framing = this.#framing
     if (framing?.kind === 'length' && this.#bodyBytesWritten + body.length > framing.length) {
       // Past the declared length the extra bytes are not part of this response at all: a

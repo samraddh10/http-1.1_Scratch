@@ -100,6 +100,19 @@ export function isInformational(code: number): boolean {
   return code >= 100 && code < 200
 }
 
+/**
+ * Statuses whose response has a zero-length body whatever the header fields say.
+ *
+ * RFC 9112 section 6.3 makes this the first rule of response framing, ahead of both
+ * Content-Length and Transfer-Encoding: for 1xx, 204 and 304 the body is over at the empty
+ * line, so a framing header cannot describe anything and is not sent. A 304 in particular
+ * is answering a conditional request -- the client already has the content -- and a
+ * Content-Length on it is the reason some caches store an empty entry for a live resource.
+ */
+export function forbidsContent(code: number): boolean {
+  return isInformational(code) || code === 204 || code === 304
+}
+
 export function reasonPhrase(code: number): string {
   return STATUS_CODES[code] ?? 'Unknown'
 }
