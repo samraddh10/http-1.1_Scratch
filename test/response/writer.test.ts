@@ -120,15 +120,16 @@ test('the writer refuses the orderings that would corrupt a response', () => {
   const sink = recorder()
   const response = new ResponseWriter(sink)
 
-  assert.throws(() => response.write('early'), /before writeHead/)
-
-  response.writeHead({ status: 200 })
+  // `write()` before `writeHead()` is not one of them: it sends the head itself, the way
+  // Node's does, and 3.2 makes that the moment the framing is chosen.
+  response.writeHead({ status: 200, headers: { 'Content-Length': 4 } })
   assert.equal(response.headersSent, true)
   assert.throws(() => response.writeHead({ status: 500 }), /twice/)
 
   response.end('done')
   assert.equal(response.finished, true)
   assert.throws(() => response.write('late'), /after end/)
+  assert.throws(() => response.end(), /end\(\) called twice/)
   assert.match(sink.bytes(), /\r\n\r\ndone$/)
 })
 
