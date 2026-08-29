@@ -4,7 +4,13 @@ import type { Socket } from 'node:net'
 
 import { config } from '../config.js'
 
-export type CloseReason = 'client-end' | 'client-error' | 'idle-timeout' | 'server-shutdown'
+export type CloseReason =
+  | 'client-end'
+  | 'client-error'
+  | 'idle-timeout'
+  | 'server-shutdown'
+  /** The exchange that just finished was the connection's last -- module 4 decided so. */
+  | 'end-of-exchange'
 
 /** Called when a written chunk has been handed to the OS, or when it never will be. */
 export type FlushCallback = (error?: Error) => void
@@ -97,8 +103,28 @@ export class Connection {
     return this.closed ? 0 : this.socket.writableLength
   }
 
+  /** True while the read side is stopped and arriving bytes are left in the kernel. */
+  get paused(): boolean {
+    return !this.closed && this.socket.isPaused()
+  }
+
   touch(): void {
     this.lastActivityAt = Date.now()
+  }
+
+  /**
+   * Stops reading. This is backpressure in the other direction from `write()`: a client
+   * that pipelines requests faster than they are answered would otherwise have every one
+   * of them parsed and queued in this process, so the read side stops until the queue
+   * drains and the unread bytes stay in the client's send buffer, where they cost it
+   * memory rather than the server.
+   */
+  pause(): void {
+    if (!this.closed) this.socket.pause()
+  }
+
+  resume(): void {
+    if (!this.closed) this.socket.resume()
   }
 
   /**

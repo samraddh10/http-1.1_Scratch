@@ -1,7 +1,7 @@
 // module 3.1-3.3  server/http/response/writer.ts -- status line, headers, framing, bodyless rules
 
 import { config } from '../../config.js'
-import { hasForbiddenFieldByte, isToken, trimOWS } from '../parser/tokens.js'
+import { hasForbiddenFieldByte, isToken, listTokens, trimOWS } from '../parser/tokens.js'
 import { forbidsContent, isInformational, isValidStatus, reasonPhrase } from './status.js'
 
 /** A number is accepted because Content-Length is one everywhere it is produced. */
@@ -240,6 +240,18 @@ export interface ResponseWriterOptions {
    * HEAD at all.
    */
   readonly method?: string
+  /**
+   * The connection policy module 4 decided for this exchange. When it is set this writer
+   * owns the `Connection` header; when it is not, the header is left to the caller, which
+   * is what 3.4's error path does.
+   */
+  readonly keepAlive?: boolean
+  /**
+   * Called once `end()` has put the last byte of this response on the sink. Module 4 uses
+   * it to start the next exchange or close the connection; 5.3's `'finish'` event is the
+   * same moment seen from the stream side.
+   */
+  readonly onFinish?: () => void
 }
 
 /**
@@ -272,6 +284,7 @@ export class ResponseWriter {
   #finished = false
   #bodyAllowed = true
   #bodyBytesWritten = 0
+  #closeAnnounced = false
 
   constructor(sink: ByteSink, options: ResponseWriterOptions = {}) {
     this.#sink = sink
@@ -307,11 +320,14 @@ export class ResponseWriter {
   }
 
   /**
-   * True once this response is framed by the end of the connection, which module 4 must
-   * then actually close: here the close is the framing, not a policy choice.
+   * True once this connection cannot carry another request after this response -- either
+   * because the close is the framing, or because the policy in `keepAlive` said so. Module
+   * 4 reads this rather than its own decision, because the framing can overrule it.
    */
   get mustCloseAfter(): boolean {
-    return this.#framing?.kind === 'close'
+    return (
+      this.#framing?.kind === 'close' || this.#options.keepAlive === false || this.#closeAnnounced
+    )
   }
 
   /**
@@ -359,7 +375,31 @@ export class ResponseWriter {
     }
 
     this.#finished = true
+    this.#options.onFinish?.()
     return accepted
+  }
+
+  /**
+   * The `Connection` header, from the policy module 4 handed down.
+   *
+   * Applied here rather than by the caller because it cannot be known any earlier than the
+   * framing is: an HTTP/1.0 response whose length is not in hand at head time is delimited
+   * by the close itself, so that response ends the connection whatever the request asked
+   * for. An announced keep-alive on a close-delimited body would leave the client waiting
+   * for a second response on a socket that is already going away.
+   */
+  #withConnection(head: ResponseHead, framing: ResponseFraming): OutgoingHeaders | undefined {
+    const { keepAlive, httpVersion } = this.#options
+    if (keepAlive === undefined) return head.headers
+    // An interim response is a bare status line: the connection it is sent on belongs to
+    // the final response that follows it, not to this one.
+    if (isInformational(head.status)) return head.headers
+    if (lowercasedNames(head.headers).has('connection')) return head.headers
+
+    if (!keepAlive || framing.kind === 'close') return { Connection: 'close', ...head.headers }
+
+    // A 1.1 connection is already persistent, so the header would only restate the default.
+    return httpVersion === '1.0' ? { Connection: 'keep-alive', ...head.headers } : head.headers
   }
 
   #sendHead(head: ResponseHead): boolean {
@@ -375,8 +415,17 @@ export class ResponseWriter {
     this.#bodyAllowed = framing.kind !== 'none' && method?.toUpperCase() !== 'HEAD'
 
     const options: SerialiseOptions = serverName === undefined ? {} : { serverName }
+    const headers = this.#withConnection(head, framing)
+    const sending: ResponseHead =
+      headers === undefined ? { ...head, framing } : { ...head, headers, framing }
 
-    return this.#sink.write(serialiseHead({ ...head, framing }, options))
+    // Read back off the headers actually going out rather than off the policy, so that a
+    // `Connection: close` an application set for its own reasons -- 3.4's error path is one
+    // -- is a close that happens, not just a close the client is told about.
+    const announced = firstValue(sending.headers ?? {}, 'connection')
+    if (announced !== undefined && listTokens(announced).has('close')) this.#closeAnnounced = true
+
+    return this.#sink.write(serialiseHead(sending, options))
   }
 
   #writeBody(body: Buffer): boolean {

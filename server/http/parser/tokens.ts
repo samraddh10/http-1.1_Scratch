@@ -55,3 +55,21 @@ export function hasForbiddenFieldByte(value: string): boolean {
   }
   return false
 }
+
+/**
+ * The members of a comma-separated list field, lowercased -- the `#rule` of RFC 9110
+ * section 5.6.1. Empty elements are legal there and carry no meaning, so they are dropped.
+ *
+ * Repeated field lines have already been joined with ", " by the header section, so one
+ * split covers `Connection: close` and `Connection: keep-alive, close` alike.
+ */
+export function listTokens(value: string | undefined): Set<string> {
+  const tokens = new Set<string>()
+  if (value === undefined) return tokens
+
+  for (const part of value.split(',')) {
+    const token = trimOWS(part).toLowerCase()
+    if (token.length > 0) tokens.add(token)
+  }
+  return tokens
+}
