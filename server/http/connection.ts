@@ -7,7 +7,7 @@
 // from the response whether the socket is reused or ends. Phase 5 replaces the listener
 // with the ServerRequest/ServerResponse shims and changes nothing here.
 
-import type { Config } from '../config.js'
+import { config as defaultConfig, type Config } from '../config.js'
 import type { Connection } from '../tcp/connection.js'
 import type { TcpServerOptions } from '../tcp/server.js'
 import { ProtocolError, requestTimeout } from './errors.js'
@@ -53,6 +53,7 @@ export class HttpConnection {
   readonly #tcp: Connection
   readonly #listener: ExchangeListener
   readonly #serverName: string | undefined
+  readonly #config: Config
   readonly #parser: RequestParser
 
   /**
@@ -71,10 +72,18 @@ export class HttpConnection {
 
   #closing = false
 
+  /**
+   * Requests OPENED, not served. Under pipelining a head is read long before the response
+   * to it goes out, and counting what has been answered would let a client past the cap by
+   * sending the next request before the last one was finished with.
+   */
+  #requestsOpened = 0
+
   constructor(tcp: Connection, options: HttpConnectionOptions) {
     this.#tcp = tcp
     this.#listener = options.listener
     this.#serverName = options.serverName
+    this.#config = options.config ?? defaultConfig
 
     const parserOptions: RequestParserOptions = {
       onHead: (head) => this.#openExchange(head),
@@ -110,9 +119,15 @@ export class HttpConnection {
   //called the instant the parser finishes a request's head (line + headers). Turns that head into a full exchange — decide keep-alive, 
   // build a ResponseWriter, create the ExchangeState — put it in the queue, and dispatch it to the listener immediately if and only if nothing is ahead of it in the queue.
   #openExchange(head: RequestHead): void {
+    this.#requestsOpened++
+
     const persistence = decidePersistence({
       httpVersion: head.httpVersion,
       connection: head.headers['connection'],
+      // The last request the cap allows is answered normally and carries the close, so the
+      // client is told on the response it asked for rather than by a socket that stops
+      // working. What the cap bounds is how long one client can hold a connection slot.
+      serverWantsClose: this.#requestsOpened >= this.#config.maxRequestsPerConnection,
     })
 
     const options: ResponseWriterOptions = {

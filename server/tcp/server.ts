@@ -8,6 +8,8 @@ import { Connection, type ConnectionHandlers, type ConnectionOptions } from './c
 export interface TcpServerOptions extends ConnectionHandlers {
   onConnection?(connection: Connection): void
   idleTimeoutMs?: number
+  /** Concurrent connections allowed. Past it a socket is closed on arrival. */
+  maxConnections?: number
 }
 
 export interface TcpServer {
@@ -16,6 +18,8 @@ export interface TcpServer {
   address(): AddressInfo | null
   connections(): readonly Connection[]
   readonly connectionCount: number
+  /** Sockets closed on arrival for being over the cap. Module 7 reports it. */
+  readonly refusedConnections: number
   readonly listening: boolean
 }
 
@@ -29,6 +33,8 @@ export function echoByteCounts(connection: Connection, chunk: Buffer): void {
 
 export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
   const open = new Set<Connection>()
+  const maxConnections = options.maxConnections ?? config.maxConnections
+  let refused = 0
 
   const handlers: ConnectionOptions = {
     onData: options.onData ?? echoByteCounts,
@@ -48,6 +54,18 @@ export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
       noDelay: true,
     },
     (socket) => {
+      // Closed on arrival, with nothing written and nothing read. There is no request to
+      // answer yet -- the client has not sent one -- and reading far enough to produce a
+      // 503 would spend the parser, the buffer and the timer slot that being over the cap
+      // says are not there. The cap is a resource limit, so it cannot cost a resource to
+      // enforce; a client sees the connection refused, which is what it would see from
+      // every other server at its accept limit.
+      if (open.size >= maxConnections) {
+        refused++
+        socket.destroy()
+        return
+      }
+
       const connection = new Connection(socket, handlers)
       open.add(connection)
       options.onConnection?.(connection)
@@ -89,6 +107,9 @@ export function createTcpServer(options: TcpServerOptions = {}): TcpServer {
     connections: () => [...open],
     get connectionCount() {
       return open.size
+    },
+    get refusedConnections() {
+      return refused
     },
     get listening() {
       return server.listening
