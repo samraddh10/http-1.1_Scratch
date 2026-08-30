@@ -14,10 +14,44 @@ import { ProtocolError, requestTimeout } from './errors.js'
 import { decidePersistence } from './keep-alive.js'
 import type { RequestHead, RequestParserOptions } from './parser/request-parser.js'
 import { RequestParser } from './parser/request-parser.js'
+import { listTokens } from './parser/tokens.js'
 import { respondToProtocolError, writeErrorResponse } from './response/error-response.js'
-import { ResponseWriter, type ResponseWriterOptions } from './response/writer.js'
+import { ResponseWriter, serialiseHead, type ResponseWriterOptions } from './response/writer.js'
 
 const NO_TRAILERS: Readonly<Record<string, string>> = Object.freeze({})
+
+interface Expectation {
+  /** The client is waiting for `100 Continue` before it sends the body. */
+  readonly continue: boolean
+  /** The `Expect` field, when it asked for something this server does not implement. */
+  readonly unsupported: string | undefined
+}
+
+const NO_EXPECTATION: Expectation = { continue: false, unsupported: undefined }
+
+/**
+ * What the request's `Expect` field asks for, if it has one.
+ *
+ * The only expectation defined by HTTP is `100-continue` (RFC 9110 section 10.1.1), and it
+ * exists so a client can ask before sending content it may not be allowed to send. Anything
+ * else is refused rather than ignored: ignoring it would have the client believe a condition
+ * was honoured when it was not.
+ */
+function classifyExpectation(head: RequestHead): Expectation {
+  const expect = head.headers['expect']
+  if (expect === undefined) return NO_EXPECTATION
+
+  const asked = listTokens(expect)
+  if (asked.size === 1 && asked.has('100-continue')) {
+    // Section 10.1.1 has a server ignore a 100-continue expectation from an HTTP/1.0 client:
+    // the mechanism is an interim response, and 1.0 has no way to receive one. Nothing is
+    // refused -- the client is not waiting, so it sends its body regardless.
+    const usable = head.httpVersion === '1.1' && head.framing.kind !== 'none'
+    return { continue: usable, unsupported: undefined }
+  }
+
+  return { continue: false, unsupported: expect }
+}
 
 /**
  * One request and the response being written for it.
@@ -47,6 +81,10 @@ interface ExchangeState extends Exchange {
   requestComplete: boolean
   trailers: Readonly<Record<string, string>> | undefined
   readonly buffered: Buffer[]
+  /** The client is holding its body back until this server says it will take it. */
+  expects100: boolean
+  /** An `Expect` this server cannot meet, kept to name it in the 417. */
+  unsupportedExpect: string | undefined
 }
 
 export class HttpConnection {
@@ -112,6 +150,10 @@ export class HttpConnection {
       this.#fail(thrown)
       return
     }
+    // After the parser has drained the chunk, not from inside `onHead`: a client that sent
+    // its head and body together is still mid-parse at head time, and would be told to
+    // continue with something it had already finished.
+    this.#writeContinue(this.#queue[0])
     //if no error occurred, re-check whether the socket should be paused or resumed given whatever state changed during parsing.
     this.#throttle()
   }
@@ -138,6 +180,8 @@ export class HttpConnection {
       ...(this.#serverName === undefined ? {} : { serverName: this.#serverName }),
     }
 
+    const expectation = classifyExpectation(head)
+
     const state: ExchangeState = {
       head,
       response: new ResponseWriter(this.#tcp, options),
@@ -146,6 +190,8 @@ export class HttpConnection {
       requestComplete: false,
       trailers: undefined,
       buffered: [],
+      expects100: expectation.continue,
+      unsupportedExpect: expectation.unsupported,
     }
 
     this.#reading = state
@@ -158,6 +204,10 @@ export class HttpConnection {
   #receiveBody(chunk: Buffer): void {
     const state = this.#reading
     if (state === undefined) throw new Error('wirehttp: body bytes with no request open')
+
+    // The client sent its body without waiting for permission, which it is entitled to do.
+    // There is nothing left to permit.
+    state.expects100 = false
 
     if (state.dispatched) state.onBodyChunk?.(chunk)
     else state.buffered.push(chunk)
@@ -180,6 +230,13 @@ export class HttpConnection {
   #dispatch(state: ExchangeState): void {
     state.dispatched = true
 
+    // Both of these write to the socket, so they run at dispatch rather than when the head
+    // was read: a pipelined request must not put bytes in front of the response before it.
+    if (state.unsupportedExpect !== undefined) {
+      this.#refuseExpectation(state)
+      return
+    }
+
     try {
       this.#listener(state)
     } catch (thrown) {
@@ -190,6 +247,51 @@ export class HttpConnection {
     for (const chunk of state.buffered) state.onBodyChunk?.(chunk)
     state.buffered.length = 0
     if (state.requestComplete) state.onRequestComplete?.(state.trailers ?? NO_TRAILERS)
+  }
+
+  /**
+   * Writes the interim response a client with `Expect: 100-continue` is waiting for.
+   *
+   * Skipped once the listener has answered, and that is the entire point of the mechanism:
+   * a client asks before uploading, and a final status arriving instead of the 100 tells it
+   * not to bother. A 50 MB upload refused on its headers then costs one round trip rather
+   * than 50 MB.
+   */
+  #writeContinue(state: ExchangeState | undefined): void {
+    if (state === undefined || !state.dispatched || !state.expects100) return
+    state.expects100 = false
+
+    // Nothing left to permit once the response has been given, and nothing to wait for once
+    // the body has arrived anyway.
+    if (state.response.headersSent || state.requestComplete) return
+
+    // A bare status line and the empty line after it. 3.1 gives an interim response no Date,
+    // no Server and no framing, because it is not the response -- the real one follows on
+    // this same connection, and a client reads both.
+    this.#tcp.write(serialiseHead({ status: 100, framing: { kind: 'none' } }))
+  }
+
+  /**
+   * RFC 9110 section 10.1.1: an expectation the server cannot meet MUST be refused with 417
+   * rather than ignored. The listener never sees the request -- an application cannot be
+   * asked to honour a condition this server has already said it does not implement.
+   */
+  #refuseExpectation(state: ExchangeState): void {
+    const body = '417 Expectation Failed\n'
+    // The client is holding a body back waiting for a permission that is never coming, so
+    // there is no way to find where the next request would start. With no content declared
+    // the stream position is still known and the connection survives the refusal.
+    const hasBody = state.head.framing.kind !== 'none'
+
+    state.response.writeHead({
+      status: 417,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        ...(hasBody ? { Connection: 'close' } : {}),
+      },
+    })
+    state.response.end(body)
   }
 
   //onFinish runs when an exchange’s response is fully sent. It removes that exchange from the queue, updates the counter, 
@@ -210,6 +312,7 @@ export class HttpConnection {
 
     const next = this.#queue[0]
     if (next !== undefined) this.#dispatch(next)
+    this.#writeContinue(this.#queue[0])
     this.#throttle()
   }
 
