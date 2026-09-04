@@ -27,9 +27,11 @@ async function started(
 ): Promise<Started> {
   const closes: CloseReason[] = []
   const server = createTcpServer({
-    ...serveHttp({ listener }),
+    ...serveHttp({
+      listener,
+      onConnectionClose: (_connection, reason) => closes.push(reason),
+    }),
     idleTimeoutMs: IDLE_MS,
-    onClose: (_connection, reason) => closes.push(reason),
   })
 
   const address = await server.listen(0)
