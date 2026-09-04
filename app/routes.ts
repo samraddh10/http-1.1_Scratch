@@ -23,5 +23,9 @@ export function createRoutes(): Router {
     })
   })
 
+  routes.get('/boom', () => {
+    throw new Error('boom: this route throws on purpose')
+  })
+
   return routes
 }
