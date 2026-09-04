@@ -1,6 +1,7 @@
 // module 3.1-3.3  server/http/response/writer.ts -- status line, headers, framing, bodyless rules
 
 import { config } from '../../config.js'
+import { metrics as defaultMetrics, type MetricsRegistry } from '../../metrics/registry.js'
 import { hasForbiddenFieldByte, isToken, listTokens, trimOWS } from '../parser/tokens.js'
 import { forbidsContent, isInformational, isValidStatus, reasonPhrase } from './status.js'
 
@@ -252,6 +253,8 @@ export interface ResponseWriterOptions {
    * same moment seen from the stream side.
    */
   readonly onFinish?: () => void
+  
+  readonly metrics?: MetricsRegistry
 }
 
 /**
@@ -278,8 +281,10 @@ function toBuffer(chunk: Buffer | string, encoding: BufferEncoding): Buffer {
 export class ResponseWriter {
   readonly #sink: ByteSink
   readonly #options: ResponseWriterOptions
+  readonly #metrics: MetricsRegistry
 
   #framing: ResponseFraming | undefined
+  #status: number | undefined
   #head: Buffer | undefined
   #headersSent = false
   #finished = false
@@ -290,6 +295,7 @@ export class ResponseWriter {
   constructor(sink: ByteSink, options: ResponseWriterOptions = {}) {
     this.#sink = sink
     this.#options = options
+    this.#metrics = options.metrics ?? defaultMetrics
   }
 
   get headersSent(): boolean {
@@ -303,6 +309,11 @@ export class ResponseWriter {
   /** The framing this response committed to, once its head has gone out. */
   get framing(): ResponseFraming | undefined {
     return this.#framing
+  }
+
+  /** The status this response committed to, or undefined before its head went out. */
+  get status(): number | undefined {
+    return this.#status
   }
 
   /**
@@ -425,6 +436,7 @@ export class ResponseWriter {
 
     const framing = head.framing ?? decideResponseFraming(head.headers ?? {}, context)
     this.#framing = framing
+    this.#status = head.status
     this.#headersSent = true
     this.#bodyAllowed = framing.kind !== 'none' && method?.toUpperCase() !== 'HEAD'
 
@@ -440,7 +452,11 @@ export class ResponseWriter {
     if (announced !== undefined && listTokens(announced).has('close')) this.#closeAnnounced = true
 
     this.#head = serialiseHead(sending, options)
-    return this.#sink.write(this.#head)
+    const accepted = this.#sink.write(this.#head)
+
+    // Counted once the head is on the sink, so what the dashboard shows is what went out.
+    this.#metrics.responseWritten(head.status)
+    return accepted
   }
 
   #writeBody(body: Buffer): boolean {
