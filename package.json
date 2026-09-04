@@ -19,6 +19,7 @@
     "express": "4.22.2"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
     "@types/express": "4.17.25",
     "@types/node": "^22.18.12",
     "@types/react": "19.2.18",
@@ -27,6 +28,7 @@
     "autocannon": "8.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "tailwindcss": "4.3.3",
     "tsx": "4.23.12",
     "typescript": "5.9.3",
     "vite": "8.2.2"
