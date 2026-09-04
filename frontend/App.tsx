@@ -2,6 +2,7 @@
 
 import type { ReactElement } from 'react'
 
+import { Connections } from './panels/Connections'
 import { StatRow } from './panels/StatRow'
 import { useMetricsStream, type StreamStatus } from './useMetricsStream'
 
@@ -35,6 +36,7 @@ export function App(): ReactElement {
 
       <main className="flex flex-col gap-6">
         <StatRow snapshot={snapshot} />
+        <Connections snapshot={snapshot} />
       </main>
     </div>
   )
