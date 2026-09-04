@@ -5,7 +5,7 @@ import { Writable } from 'node:stream'
 import type { Connection } from '../tcp/connection.js'
 import type { HeaderValue, OutgoingHeaders, ResponseHead } from '../http/response/writer.js'
 import { ResponseWriter } from '../http/response/writer.js'
-import { pinToInstance } from './own-props.js'
+import { pinToInstance, refuseMembers } from './own-props.js'
 
 const WRITABLE_MEMBERS: readonly string[] = Object.getOwnPropertyNames(Writable.prototype).filter(
   (name) => name !== 'constructor',
@@ -32,6 +32,19 @@ const DECLARED = [
 
 const PINNED: readonly string[] = [...WRITABLE_MEMBERS, ...DECLARED]
 
+const UNSUPPORTED: PropertyDescriptorMap = refuseMembers([
+  'assignSocket',
+  'detachSocket',
+  'addTrailers',
+  'setTimeout',
+  'writeContinue',
+  'writeEarlyHints',
+  'writeProcessing',
+  'writeHeader',
+  'appendHeader',
+  'setHeaders',
+])
+
 export interface ServerResponseOptions {
   readonly writer: ResponseWriter
   readonly tcp: Connection
@@ -49,6 +62,13 @@ export class ServerResponse extends Writable {
   statusMessage = ''
 
   readonly socket: Socket
+  /**
+   * Node's deprecated alias. It is not in the section 4 table, and it is here anyway: after
+   * reparenting, `OutgoingMessage.prototype`'s `connection` getter answers with `this.socket`
+   * and the member starts working by accident. A member that exists only once Express has
+   * touched the object is the exact inconsistency subphase 5.1 exists to prevent.
+   */
+  readonly connection: Socket
 
   readonly #writer: ResponseWriter
   readonly #tcp: Connection
@@ -61,8 +81,10 @@ export class ServerResponse extends Writable {
     this.#writer = options.writer
     this.#tcp = options.tcp
     this.socket = options.tcp.socket
+    this.connection = options.tcp.socket
 
     pinToInstance(this, PINNED)
+    Object.defineProperties(this, UNSUPPORTED)
   }
 
   get headersSent(): boolean {
