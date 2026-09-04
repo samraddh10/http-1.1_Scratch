@@ -11,7 +11,7 @@
     "dev": "tsx watch app/server.ts",
     "start": "npm run build:frontend && tsx app/server.ts",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.frontend.json",
     "build:frontend": "vite build",
     "bench": "node bench/autocannon.mjs"
   },
