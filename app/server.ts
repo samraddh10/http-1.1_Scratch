@@ -14,11 +14,28 @@ import type { ErrorRequestHandler } from 'express'
 import { createServer } from '../server/index.js'
 
 import { config } from '../server/config.js'
+import { liveConnections, metrics, type LiveConnections } from '../server/metrics/registry.js'
+import type { TcpServer } from '../server/tcp/server.js'
 import { createRoutes } from './routes.js'
 
 // Resolved from this file rather than the working directory, so the server serves the same
 // directory however it was started. Empty until `npm run build:frontend` fills it.
 const publicDir = fileURLToPath(new URL('../public', import.meta.url))
+
+const NO_CONNECTIONS: LiveConnections = { refused: 0, connections: [] }
+
+/**
+ * The live half of a metrics snapshot, when the server underneath has one.
+ *
+ * Node's `http.Server` does not, and that is the honest answer rather than a gap: these are
+ * wirehttp's own protocol counters, so mounted on Node's server there are none to report.
+ * Reading the layer through a shape rather than a type is also what keeps the swap above to
+ * one line -- this expression compiles under either import.
+ */
+function liveOf(mounted: unknown): LiveConnections {
+  const { tcp } = mounted as { tcp?: TcpServer }
+  return tcp === undefined ? NO_CONNECTIONS : liveConnections(tcp)
+}
 
 // Four arguments is how Express recognises an error handler, and it has to be registered
 // after everything that might fail.
@@ -42,7 +59,7 @@ const app = express()
 // exists the directory is empty, every request falls through, and the router answers.
 app.use(express.static(publicDir))
 app.use(express.json())
-app.use(createRoutes())
+app.use(createRoutes({ snapshot: () => metrics.snapshot(liveOf(server)) }))
 app.use(reportError)
 
 // Express's handler type demands the whole of `http.IncomingMessage` and
