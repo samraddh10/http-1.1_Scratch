@@ -27,9 +27,12 @@ async function started(
   const config: Config = { ...defaults, ...overrides }
 
   const server = createTcpServer({
-    ...serveHttp({ listener: echoRequestLine, config }),
+    ...serveHttp({
+      listener: echoRequestLine,
+      config,
+      onConnectionClose: (_connection, reason) => closes.push(reason),
+    }),
     ...(overrides.maxConnections === undefined ? {} : { maxConnections: overrides.maxConnections }),
-    onClose: (_connection, reason) => closes.push(reason),
   })
 
   const address = await server.listen(0)
