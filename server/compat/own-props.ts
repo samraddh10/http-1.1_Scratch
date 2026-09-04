@@ -21,6 +21,26 @@ export function pinToInstance(instance: object, names: readonly string[]): void 
   }
 }
 
+
+export function refuseMembers(
+  names: readonly string[],
+  kind: 'method' | 'property' = 'method',
+): PropertyDescriptorMap {
+  const descriptors: PropertyDescriptorMap = {}
+
+  for (const name of names) {
+    const refuse = (): never => {
+      throw new Error(`wirehttp: ${name} is unsupported by design -- see DECISIONS.md`)
+    }
+    descriptors[name] =
+      kind === 'method'
+        ? { value: refuse, writable: true, enumerable: false, configurable: true }
+        : { get: refuse, enumerable: false, configurable: true }
+  }
+
+  return descriptors
+}
+
 /** The descriptor for `name` from the nearest prototype that defines it. */
 function inheritedDescriptor(instance: object, name: string): PropertyDescriptor | undefined {
   let proto: object | null = Object.getPrototypeOf(instance)
