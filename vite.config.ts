@@ -1,5 +1,6 @@
 // module 8.1  vite.config.ts -- builds frontend/ into public/, which express.static serves
 
+import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
@@ -12,7 +13,7 @@ export default defineConfig({
   // the same idea twice.
   publicDir: false,
 
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
 
   build: {
     // Resolved against `root`, so this is the repository's public/ -- the directory
