@@ -9,6 +9,7 @@
   --accent: #6fd3c7;
   --warn: #d8a657;
   --bad: #e06c75;
+  --info: #7f9cf5;
 
   --gap: 1rem;
   --radius: 3px;
@@ -63,4 +64,131 @@ body {
   display: flex;
   flex-direction: column;
   gap: calc(var(--gap) * 1.5);
+}
+
+/* -- masthead stream badge (8.2) ------------------------------------------------------- */
+
+.masthead {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.masthead h1,
+.masthead p {
+  grid-column: 1;
+}
+
+.stream {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  justify-self: end;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+
+.stream-live {
+  color: var(--accent);
+}
+
+.stream-connecting,
+.stream-reconnecting {
+  color: var(--warn);
+}
+
+.stream-closed {
+  color: var(--bad);
+}
+
+/* -- panels and the stat row (8.2) ----------------------------------------------------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--gap);
+}
+
+.panel-title {
+  margin: 0 0 var(--gap);
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--gap);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  color: var(--dim);
+}
+
+.stat-value {
+  /* Tabular figures, so a value going from 9 to 10 does not shift the row it sits in.
+     Every number on this page rewrites itself twice a second. */
+  font-variant-numeric: tabular-nums;
+  font-size: 1.6rem;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.stat-note {
+  font-size: 0.75rem;
+  color: var(--dim);
+  min-height: 1rem;
+}
+
+.codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-variant-numeric: tabular-nums;
+  font-size: 1rem;
+  line-height: 1.9;
+  color: var(--dim);
+}
+
+.code {
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  padding: 0 0.35rem;
+  color: var(--dim);
+}
+
+.code-2xx {
+  color: var(--accent);
+}
+
+.code-3xx {
+  color: var(--info);
+}
+
+.code-4xx {
+  color: var(--warn);
+}
+
+.code-5xx {
+  color: var(--bad);
+}
+
+.code-count {
+  margin-left: 0.4rem;
+  color: var(--text);
 }
