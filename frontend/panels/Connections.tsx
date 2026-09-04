@@ -3,6 +3,7 @@
 import type { ReactElement } from 'react'
 
 import type { ConnectionRow, MetricsSnapshot } from '../useMetricsStream'
+import { Panel } from './Panel'
 
 function duration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
@@ -37,15 +38,10 @@ export function Connections({ snapshot }: { snapshot: MetricsSnapshot | null }):
     snapshot === null ? [] : [...snapshot.connections.rows].sort((a, b) => a.id - b.id)
 
   return (
-    <section className="rounded-sm border border-line bg-panel p-4">
-      <h2 className="mb-1 text-xs font-normal tracking-[0.12em] uppercase text-dim">
-        connections
-      </h2>
-      <p className="mb-4 text-xs text-dim">
-        one row per open socket. a keep-alive client serves every request down the same one, so
-        the request count climbs while the table stays a single line.
-      </p>
-
+    <Panel
+      title="connections"
+      hint="one row per open socket. a keep-alive client serves every request down the same one, so the request count climbs while the table stays a single line."
+    >
       <table className="w-full border-collapse tabular-nums">
         <thead>
           <tr className="text-xs text-dim">
@@ -71,6 +67,6 @@ export function Connections({ snapshot }: { snapshot: MetricsSnapshot | null }):
           )}
         </tbody>
       </table>
-    </section>
+    </Panel>
   )
 }
