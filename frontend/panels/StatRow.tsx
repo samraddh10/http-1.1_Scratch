@@ -3,6 +3,7 @@
 import type { ReactElement } from 'react'
 
 import type { MetricsSnapshot } from '../useMetricsStream'
+import { Panel } from './Panel'
 
 /** Shown in place of a number before the first snapshot arrives. */
 const PENDING = '--'
@@ -42,9 +43,7 @@ export function StatRow({ snapshot }: { snapshot: MetricsSnapshot | null }): Rea
   const codes = snapshot === null ? [] : Object.entries(snapshot.statusCounts)
 
   return (
-    <section className="rounded-sm border border-line bg-panel p-4">
-      <h2 className="mb-4 text-xs font-normal tracking-[0.12em] uppercase text-dim">live</h2>
-
+    <Panel title="live">
       <div className="grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-4">
         <Stat
           label="open connections"
@@ -82,6 +81,6 @@ export function StatRow({ snapshot }: { snapshot: MetricsSnapshot | null }): Rea
           <span className="min-h-4 text-xs text-dim">{snapshot === null ? '' : 'since boot'}</span>
         </div>
       </div>
-    </section>
+    </Panel>
   )
 }
