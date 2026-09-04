@@ -5,7 +5,7 @@ import { Readable } from 'node:stream'
 
 import type { RequestHead } from '../http/parser/request-parser.js'
 import type { Connection } from '../tcp/connection.js'
-import { pinToInstance } from './own-props.js'
+import { pinToInstance, refuseMembers } from './own-props.js'
 
 //The default argument for completeBody(). Three things going on:
 //Object.freeze({}) makes an empty object that can never gain properties.
@@ -26,6 +26,12 @@ const PINNED = [
   'completeBody',
   'abort',
 ] as const satisfies readonly (keyof ServerRequest & string)[]
+
+
+const UNSUPPORTED: PropertyDescriptorMap = {
+  ...refuseMembers(['setTimeout']),
+  ...refuseMembers(['headersDistinct', 'trailersDistinct'], 'property'),
+}
 
 export class ServerRequest extends Readable {
   readonly method: string
@@ -67,6 +73,7 @@ export class ServerRequest extends Readable {
     this.#onDemandChange = options.onDemandChange
 
     pinToInstance(this, PINNED)
+    Object.defineProperties(this, UNSUPPORTED)
   }
 
   override _read(): void {
