@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+
+    // The mirror of the root config's "no DOM": that one fails if server code reaches for
+    // a browser global, this one fails if dashboard code reaches for a Node one. Neither
+    // half can borrow the other's runtime by accident.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+
+    // Vite resolves the imports, so specifiers are extensionless here rather than carrying
+    // the `.js` that NodeNext requires of server/.
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // vite build transpiles without type checking, so nothing under frontend/ is checked
+    // at all unless `npm run typecheck` does it.
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["frontend", "vite.config.ts"]
+}
