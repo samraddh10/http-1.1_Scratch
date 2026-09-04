@@ -8,7 +8,7 @@
 // with the ServerRequest/ServerResponse shims and changes nothing here.
 
 import { config as defaultConfig, type Config } from '../config.js'
-import type { Connection } from '../tcp/connection.js'
+import type { CloseReason, Connection } from '../tcp/connection.js'
 import type { TcpServerOptions } from '../tcp/server.js'
 import { ProtocolError, requestTimeout } from './errors.js'
 import { decidePersistence } from './keep-alive.js'
@@ -66,6 +66,18 @@ export interface Exchange {
   readonly connection: Connection
   onBodyChunk?(chunk: Buffer): void
   onRequestComplete?(trailers: Readonly<Record<string, string>>): void
+  /**
+   * The socket died with this exchange still open. Module 5 turns it into the request's
+   * `'aborted'` event, which is the only thing that stops `express.json()` waiting for a
+   * body the client is no longer sending.
+   */
+  onConnectionClose?(reason: CloseReason): void
+  /**
+   * Told `false` when the listener cannot take more body bytes for now, and `true` when it
+   * can again. The inbound half of the backpressure seam: the read side of the socket has
+   * one owner, `#throttle`, and this is how a slow consumer reaches it.
+   */
+  demandBody(wanted: boolean): void
 }
 
 export type ExchangeListener = (exchange: Exchange) => void
@@ -74,6 +86,14 @@ export interface HttpConnectionOptions {
   readonly listener: ExchangeListener
   readonly config?: Config
   readonly serverName?: string
+  /**
+   * Observes closed connections, after the HTTP session has been told about them.
+   *
+   * It goes through here rather than being set on the `TcpServerOptions` this module
+   * returns, because that slot is taken: `serveHttp` owns `onClose`, and a caller replacing
+   * it would silently disconnect every open exchange from the news that its socket is gone.
+   */
+  readonly onConnectionClose?: (connection: Connection, reason: CloseReason) => void
 }
 
 interface ExchangeState extends Exchange {
@@ -109,6 +129,9 @@ export class HttpConnection {
   #reading: ExchangeState | undefined
 
   #closing = false
+
+  /** True while the exchange being read has said it cannot take more body bytes. */
+  #bodyBackpressure = false
 
   /**
    * Requests OPENED, not served. Under pipelining a head is read long before the response
@@ -192,8 +215,10 @@ export class HttpConnection {
       buffered: [],
       expects100: expectation.continue,
       unsupportedExpect: expectation.unsupported,
+      demandBody: (wanted) => this.#demandBody(state, wanted),
     }
 
+    this.#bodyBackpressure = false
     this.#reading = state
     this.#queue.push(state)
     if (this.#queue.length === 1) this.#dispatch(state)
@@ -222,7 +247,24 @@ export class HttpConnection {
     state.requestComplete = true
     state.trailers = trailers
     this.#reading = undefined
+    // There is no more body to hold back, so a demand left unsatisfied cannot keep the read
+    // side paused into the next request.
+    this.#bodyBackpressure = false
     if (state.dispatched) state.onRequestComplete?.(trailers)
+  }
+
+  /**
+   * The listener can or cannot take more body bytes.
+   *
+   * Ignored once the request has been read to its end -- `#reading` has moved on, and the
+   * bytes still arriving belong to a pipelined request rather than to this body.
+   */
+  #demandBody(state: ExchangeState, wanted: boolean): void {
+    if (this.#reading !== state) return
+    if (this.#bodyBackpressure === !wanted) return
+
+    this.#bodyBackpressure = !wanted
+    this.#throttle()
   }
 
   //Purpose: actually calls the application's listener for one exchange, and then replays whatever happened to that exchange 
@@ -325,6 +367,12 @@ export class HttpConnection {
    * that cannot be answered until the queue drains -- and nothing should be timed out
    * either, since the silence is the server's own latency rather than an idle client.
    *
+   * A body the listener has stopped reading counts as waiting on the application for the
+   * same reason and with the same consequence. Bytes left in the client's send buffer cost
+   * it memory rather than this process, and the idle timer must not be running: the silence
+   * is a slow consumer here, not a slow client, and timing it out would report the server's
+   * own latency as the client's fault mid-upload.
+   *
    * Every other state is waiting on the client: idle between requests, or a request still
    * arriving. Both read and both time out, which is what catches a client dribbling a
    * request out one byte at a time. Parse-ahead within one socket read stays allowed, so a
@@ -333,13 +381,35 @@ export class HttpConnection {
   #throttle(): void {
     if (this.#closing) return
 
-    if (this.#reading === undefined && this.#queue.length > 0) {
+    if (this.#bodyBackpressure || (this.#reading === undefined && this.#queue.length > 0)) {
       this.#tcp.pause()
       this.#tcp.disarmIdleTimeout()
     } else {
       this.#tcp.resume()
       this.#tcp.armIdleTimeout()
     }
+  }
+
+  /**
+   * The socket is gone, however it went.
+   *
+   * Every exchange still open is told, once. Without this a request whose client vanished
+   * mid-body is a stream that never ends and never errors: `raw-body` waits for bytes that
+   * are not coming, and the only thing that would ever notice is a timeout on a connection
+   * that no longer exists.
+   */
+  closed(reason: CloseReason): void {
+    this.#closing = true
+
+    // `#reading` is not always in the queue -- a listener that answers before the request
+    // has been read to its end leaves its exchange being read after it has been shifted off.
+    const open = new Set<ExchangeState>(this.#queue)
+    if (this.#reading !== undefined) open.add(this.#reading)
+
+    this.#queue.length = 0
+    this.#reading = undefined
+
+    for (const state of open) state.onConnectionClose?.(reason)
   }
 
   /**
@@ -416,6 +486,10 @@ export function serveHttp(options: HttpConnectionOptions): TcpServerOptions {
     },
     onData: (connection, chunk) => {
       sessions.get(connection)?.receive(chunk)
+    },
+    onClose: (connection, reason) => {
+      sessions.get(connection)?.closed(reason)
+      options.onConnectionClose?.(connection, reason)
     },
   }
 }
