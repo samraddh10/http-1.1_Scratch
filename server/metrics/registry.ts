@@ -2,6 +2,7 @@
 
 import { config as defaultConfig } from '../config.js'
 import type { Framing } from '../http/parser/framing.js'
+import type { TcpServer } from '../tcp/server.js'
 import { RingBuffer } from './ring-buffer.js'
 
 /** Seconds the requests-per-second figure averages over. */
@@ -18,7 +19,11 @@ export interface RequestSample {
   readonly connectionId: number
   /** Which request this was on that connection; 1 is the one that opened it. */
   readonly sequence: number
-  /** The request head as text -- the left-hand pane. */
+  /**
+   * The request head as text -- the inspector's left-hand pane. Reserialised from the field
+   * lines the parser kept, so it matches what the client sent apart from optional whitespace
+   * around a value.
+   */
   readonly head: string
   readonly method: string
   readonly target: string
@@ -74,6 +79,26 @@ export interface MetricsSnapshot {
   readonly statusCounts: Readonly<Record<string, number>>
   /** Newest first. */
   readonly recent: readonly RequestSample[]
+}
+
+/**
+ * Reads the live half of a snapshot off the TCP layer at the moment it is asked for.
+ *
+ * Every number here already exists on an object that owns it, so this copies rather than
+ * accumulates: a connection that closed a millisecond ago is simply not in the list.
+ */
+export function liveConnections(tcp: TcpServer): LiveConnections {
+  return {
+    refused: tcp.refusedConnections,
+    connections: tcp.connections().map((connection) => ({
+      id: connection.id,
+      requestsServed: connection.requestsServed,
+      idleMs: connection.idleMs,
+      ageMs: connection.ageMs,
+      bytesRead: connection.bytesRead,
+      bytesWritten: connection.bytesWritten,
+    })),
+  }
 }
 
 export interface MetricsRegistryOptions {
