@@ -7,6 +7,7 @@
 // handled it. The import list is the assertion -- if it ever grows a `compat/` entry, the
 // error path has started depending on the layer that only exists for well-formed requests.
 
+import type { MetricsRegistry } from '../../metrics/registry.js'
 import type { ProtocolError } from '../errors.js'
 import { reasonPhrase } from './status.js'
 import { ResponseWriter, type ByteSink } from './writer.js'
@@ -20,6 +21,12 @@ export interface ErrorResponseOptions {
   readonly serverName?: string
   /** The request's method, when it was read before the failure. A HEAD gets no body. */
   readonly method?: string
+  /**
+   * Where the response is counted. Passed through rather than left to the writer's default
+   * because these are the responses no exchange ever existed for: a server handed its own
+   * registry would otherwise report every malformed request to a different one.
+   */
+  readonly metrics?: MetricsRegistry
 }
 
 export interface WrittenErrorResponse {
@@ -45,9 +52,10 @@ export function writeErrorResponse(
   const { status, closeAfter } = error
   const body = `${status} ${reasonPhrase(status)}\n`
 
-  const writerOptions: { serverName?: string; method?: string } = {}
+  const writerOptions: { serverName?: string; method?: string; metrics?: MetricsRegistry } = {}
   if (options.serverName !== undefined) writerOptions.serverName = options.serverName
   if (options.method !== undefined) writerOptions.method = options.method
+  if (options.metrics !== undefined) writerOptions.metrics = options.metrics
 
   // Always HTTP/1.1, and never a negotiated version: the request line is the first thing
   // parsed, so a client whose version could not be read is answered in the newer one it
