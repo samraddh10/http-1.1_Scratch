@@ -8,6 +8,7 @@
 // with the ServerRequest/ServerResponse shims and changes nothing here.
 
 import { config as defaultConfig, type Config } from '../config.js'
+import { metrics as defaultMetrics, type MetricsRegistry } from '../metrics/registry.js'
 import type { CloseReason, Connection } from '../tcp/connection.js'
 import type { TcpServerOptions } from '../tcp/server.js'
 import { ProtocolError, requestTimeout } from './errors.js'
@@ -15,10 +16,15 @@ import { decidePersistence } from './keep-alive.js'
 import type { RequestHead, RequestParserOptions } from './parser/request-parser.js'
 import { RequestParser } from './parser/request-parser.js'
 import { listTokens } from './parser/tokens.js'
-import { respondToProtocolError, writeErrorResponse } from './response/error-response.js'
+import {
+  respondToProtocolError,
+  writeErrorResponse,
+  type ErrorResponseOptions,
+} from './response/error-response.js'
 import { ResponseWriter, serialiseHead, type ResponseWriterOptions } from './response/writer.js'
 
 const NO_TRAILERS: Readonly<Record<string, string>> = Object.freeze({})
+const CRLF = '\r\n'
 
 interface Expectation {
   /** The client is waiting for `100 Continue` before it sends the body. */
@@ -51,6 +57,23 @@ function classifyExpectation(head: RequestHead): Expectation {
   }
 
   return { continue: false, unsupported: expect }
+}
+
+/**
+ * The request head as text, reserialised from what the parser kept.
+ *
+ * `rawHeaders` holds every field line in the order and casing it arrived in, so this is the
+ * head the client sent, byte for byte, other than optional whitespace around a field value
+ * -- which the parser trims and does not keep. Reserialising costs nothing and happens once
+ * per request; the alternative was module 2 retaining the head bytes of every request for
+ * the sake of a dashboard panel.
+ */
+function headText(head: RequestHead): string {
+  const lines = [`${head.method} ${head.target} HTTP/${head.httpVersion}`]
+  for (let i = 0; i + 1 < head.rawHeaders.length; i += 2) {
+    lines.push(`${head.rawHeaders[i] ?? ''}: ${head.rawHeaders[i + 1] ?? ''}`)
+  }
+  return lines.join(CRLF) + CRLF + CRLF
 }
 
 /**
@@ -94,9 +117,13 @@ export interface HttpConnectionOptions {
    * it would silently disconnect every open exchange from the news that its socket is gone.
    */
   readonly onConnectionClose?: (connection: Connection, reason: CloseReason) => void
+  /** Where this connection's requests are recorded. Defaults to the process registry. */
+  readonly metrics?: MetricsRegistry
 }
 
 interface ExchangeState extends Exchange {
+  /** When the head was read, which is where this request's latency starts. */
+  readonly openedAt: number
   dispatched: boolean
   requestComplete: boolean
   trailers: Readonly<Record<string, string>> | undefined
@@ -112,6 +139,7 @@ export class HttpConnection {
   readonly #listener: ExchangeListener
   readonly #serverName: string | undefined
   readonly #config: Config
+  readonly #metrics: MetricsRegistry
   readonly #parser: RequestParser
 
   /**
@@ -145,6 +173,7 @@ export class HttpConnection {
     this.#listener = options.listener
     this.#serverName = options.serverName
     this.#config = options.config ?? defaultConfig
+    this.#metrics = options.metrics ?? defaultMetrics
 
     const parserOptions: RequestParserOptions = {
       onHead: (head) => this.#openExchange(head),
@@ -200,12 +229,14 @@ export class HttpConnection {
       method: head.method,
       keepAlive: persistence.keepAlive,
       onFinish: () => this.#finishExchange(),
+      metrics: this.#metrics,
       ...(this.#serverName === undefined ? {} : { serverName: this.#serverName }),
     }
 
     const expectation = classifyExpectation(head)
 
     const state: ExchangeState = {
+      openedAt: Date.now(),
       head,
       response: new ResponseWriter(this.#tcp, options),
       connection: this.#tcp,
@@ -343,6 +374,7 @@ export class HttpConnection {
     if (state === undefined) return
 
     this.#tcp.requestsServed++
+    this.#record(state)
 
     if (state.response.mustCloseAfter) {
       this.#closing = true
@@ -356,6 +388,36 @@ export class HttpConnection {
     if (next !== undefined) this.#dispatch(next)
     this.#writeContinue(this.#queue[0])
     this.#throttle()
+  }
+
+  /**
+   * One answered exchange, for the inspector panel.
+   *
+   * Recorded here because this is the only place both halves are in hand: module 2 has the
+   * request and module 3 has the response, and neither has the other. The status-code
+   * counters do not come from here -- a protocol error never opens an exchange, so a
+   * connection that answers only malformed requests would record nothing at all.
+   */
+  #record(state: ExchangeState): void {
+    const { head } = state
+    const status = state.response.status
+    if (status === undefined) return
+
+    this.#metrics.requestServed({
+      at: Date.now(),
+      connectionId: this.#tcp.id,
+      sequence: this.#tcp.requestsServed,
+      head: headText(head),
+      method: head.method,
+      target: head.target,
+      path: head.path,
+      query: head.query,
+      httpVersion: head.httpVersion,
+      headers: head.headers,
+      framing: head.framing,
+      status,
+      durationMs: Date.now() - state.openedAt,
+    })
   }
 
   /**
@@ -436,9 +498,15 @@ export class HttpConnection {
       partial ? 'an incomplete request stalled' : 'no request arrived before the idle timeout',
     )
 
-    const method = this.#reading?.head.method
-    writeErrorResponse(this.#tcp, error, method === undefined ? {} : { method })
+    writeErrorResponse(this.#tcp, error, this.#errorOptions(this.#reading?.head.method))
     this.#tcp.end('idle-timeout')
+  }
+
+  /** The error path builds its own writer, so it is handed this connection's registry. */
+  #errorOptions(method: string | undefined): ErrorResponseOptions {
+    const options: { method?: string; metrics: MetricsRegistry } = { metrics: this.#metrics }
+    if (method !== undefined) options.method = method
+    return options
   }
 
   //Called when the parser detects an invalid HTTP request. It sends an error response if it is still safe to do so; otherwise, it simply closes the connection.
@@ -453,7 +521,7 @@ export class HttpConnection {
 
     const method = this.#reading?.head.method ?? this.#parser.requestLine?.method
     this.#closing = error.closeAfter
-    respondToProtocolError(this.#tcp, error, method === undefined ? {} : { method })
+    respondToProtocolError(this.#tcp, error, this.#errorOptions(method))
   }
 
   //Called when the application’s handler throws an error. Since the problem is in the application, not the client’s request, 
@@ -476,9 +544,14 @@ export class HttpConnection {
 ///Converts the HTTP connection settings into the format expected by the TCP server. In simple terms, it connects the HTTP layer to the TCP server so serveHttp() can create a working HTTP/1.1 server.
 export function serveHttp(options: HttpConnectionOptions): TcpServerOptions {
   const sessions = new WeakMap<Connection, HttpConnection>()
+  const registry = options.metrics ?? defaultMetrics
 
   return {
     onConnection: (connection) => {
+      // Accepted sockets are counted here rather than in module 1, which never learns what
+      // a connection is for. The ones refused at the cap never reach this function and are
+      // counted by `TcpServer.refusedConnections` instead.
+      registry.connectionOpened()
       sessions.set(connection, new HttpConnection(connection, options))
     },
     onTimeout: (connection) => {
