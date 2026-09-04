@@ -280,6 +280,7 @@ export class ResponseWriter {
   readonly #options: ResponseWriterOptions
 
   #framing: ResponseFraming | undefined
+  #head: Buffer | undefined
   #headersSent = false
   #finished = false
   #bodyAllowed = true
@@ -302,6 +303,19 @@ export class ResponseWriter {
   /** The framing this response committed to, once its head has gone out. */
   get framing(): ResponseFraming | undefined {
     return this.#framing
+  }
+
+  /**
+   * The status line and header block exactly as they went on the wire, or undefined before
+   * they did.
+   *
+   * Kept because subphase 5.3 has to expose it as `res._header`: `finalhandler/index.js:259`
+   * and `send/index.js:1048` both fall back to `Boolean(res._header)` to decide whether a
+   * response has already started, and the alternative to keeping the bytes here is
+   * serialising the same head a second time somewhere else.
+   */
+  get head(): Buffer | undefined {
+    return this.#head
   }
 
   /** Body bytes put on the wire, before any chunk encoding. Zero for a bodyless response. */
@@ -425,7 +439,8 @@ export class ResponseWriter {
     const announced = firstValue(sending.headers ?? {}, 'connection')
     if (announced !== undefined && listTokens(announced).has('close')) this.#closeAnnounced = true
 
-    return this.#sink.write(serialiseHead(sending, options))
+    this.#head = serialiseHead(sending, options)
+    return this.#sink.write(this.#head)
   }
 
   #writeBody(body: Buffer): boolean {
