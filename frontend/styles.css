@@ -1,1 +1,66 @@
 /* module 8.1 -- the only stylesheet. dark, system monospace, hand-written. */
+
+:root {
+  --bg: #0b0e11;
+  --panel: #12171c;
+  --line: #222a31;
+  --text: #d7dee5;
+  --dim: #7c8b98;
+  --accent: #6fd3c7;
+  --warn: #d8a657;
+  --bad: #e06c75;
+
+  --gap: 1rem;
+  --radius: 3px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  /* The whole dashboard is aligned columns of numbers and raw bytes. A proportional face
+     would make every one of them move as the values change. */
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+    monospace;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.page {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: calc(var(--gap) * 2) var(--gap) calc(var(--gap) * 3);
+}
+
+.masthead {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--gap);
+  margin-bottom: calc(var(--gap) * 1.5);
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.masthead p {
+  margin: 0.25rem 0 0;
+  color: var(--dim);
+}
+
+.panels {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--gap) * 1.5);
+}
