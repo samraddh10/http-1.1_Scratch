@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net'
 
 import type { Config } from '../config.js'
 import type { Exchange } from '../http/connection.js'
+import type { MetricsRegistry } from '../metrics/registry.js'
 import { serveHttp } from '../http/connection.js'
 import type { Connection, CloseReason } from '../tcp/connection.js'
 import type { TcpServer } from '../tcp/server.js'
@@ -20,6 +21,8 @@ export interface CreateServerOptions {
   readonly maxConnections?: number
   /** Observes closed sockets. Module 7's connection counters hang off this. */
   readonly onConnectionClose?: (connection: Connection, reason: CloseReason) => void
+  /** Where this server records its metrics. Defaults to the process registry. */
+  readonly metrics?: MetricsRegistry
 }
 
 //This is the shape of the object createServer returns
@@ -88,6 +91,7 @@ export function createServer(
       ...(options.onConnectionClose === undefined
         ? {}
         : { onConnectionClose: options.onConnectionClose }),
+      ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
     }),
     ...(options.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: options.idleTimeoutMs }),
     ...(options.maxConnections === undefined ? {} : { maxConnections: options.maxConnections }),
