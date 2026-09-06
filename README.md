@@ -78,32 +78,9 @@ test/             module 9  331 tests
 bench/            module 9  autocannon, wirehttp against node:http
 ```
 
-Roughly 4,100 lines under `server/`, 6,600 under `test/`.
+## Limits
 
-## What the protocol layer does
-
-**Framing.** Content-Length and Transfer-Encoding are resolved before a single body byte is
-read. Both present is a request smuggling attempt and is refused; so is a duplicate or
-non-decimal Content-Length, and a transfer coding other than `chunked`. Chunked bodies
-decode incrementally with trailers, and neither decoder ever accumulates a whole body -
-`express.json()` reads the request as a stream, and flow control runs end to end.
-
-**Keep-alive.** HTTP/1.1 persists unless the client says `close`; HTTP/1.0 ends unless it
-opted in with `keep-alive`. Pipelined requests are read ahead and answered in order, with
-the responses never allowed to overtake each other on the wire.
-
-**Bodyless responses.** HEAD, 204, 304 and the 1xx range carry a head and no body, and the
-writer enforces that rather than trusting the handler.
-
-**100-continue.** An `Expect: 100-continue` from a 1.1 client with a body gets its interim
-response before the body is read. An expectation the server does not implement is refused
-rather than ignored. From a 1.0 client it is ignored, as RFC 9110 section 10.1.1 requires.
-
-**Targets.** Origin-form and absolute-form both parse. The path is percent-decoded, and
-traversal through encoded separators is rejected there rather than left to the application.
-
-**Limits, all in [`server/config.ts`](server/config.ts) and all overridable by environment
-variable:**
+All in [`server/config.ts`](server/config.ts), all overridable by environment variable.
 
 | Control | Default | Status on breach |
 | --- | --- | --- |
@@ -120,21 +97,6 @@ variable:**
 The idle timeout is the slowloris control and the two header caps are the header-bomb
 control. A bad value throws at boot rather than falling back: `bytes > NaN` is always false,
 so a mistyped limit would disable the check and nothing would look wrong.
-
-## The compatibility layer
-
-`ServerRequest` extends `stream.Readable` and `ServerResponse` extends `stream.Writable`.
-They implement the subset of `IncomingMessage` and `ServerResponse` that Express and its
-request/response-touching dependencies actually reach for - `writeHead`, `setHeader`,
-`getHeaders`, `flushHeaders`, `headersSent`, `socket`, `headers`, `rawHeaders`, `url`,
-`method`, `httpVersion` and the stream methods - and deliberately nothing else. Members
-outside that subset throw with a message naming them, rather than returning `undefined` and
-failing three frames later.
-
-Both shims import their Node types with `import type` only, so the compiler checks them
-against the real interface while nothing from Node's implementation reaches the runtime.
-[`test/guard/no-node-http.test.ts`](test/guard/no-node-http.test.ts) scans `server/` and
-fails the build if a value import ever appears.
 
 ## Metrics and the dashboard
 
