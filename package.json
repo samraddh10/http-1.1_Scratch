@@ -13,7 +13,7 @@
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.frontend.json",
     "build:frontend": "vite build",
-    "bench": "node bench/autocannon.mjs"
+    "bench": "node --import tsx bench/autocannon.mjs"
   },
   "dependencies": {
     "express": "4.22.2"
