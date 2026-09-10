@@ -48,8 +48,8 @@ function Pane({
   children: ReactNode
 }): ReactElement {
   return (
-    <div className="min-w-0">
-      <div className="mb-2 flex items-baseline justify-between gap-3">
+    <div className="flex min-w-0 flex-col fit:min-h-0">
+      <div className="mb-2 flex shrink-0 items-baseline justify-between gap-3">
         <h3 className="text-xs tracking-[0.14em] text-dim uppercase">{label}</h3>
         <span className="shrink-0 text-xs text-faint tabular-nums">{meta}</span>
       </div>
@@ -81,7 +81,8 @@ function RawHead({ head }: { head: string }): ReactElement {
   if (lines.at(-1) === '') lines.pop()
 
   return (
-    <pre className="h-64 overflow-auto rounded-sm border border-line bg-sunken p-3 text-xs leading-6">
+    // A fixed height on a scrolling page; under `fit` it takes what the panel has left over.
+    <pre className="h-64 overflow-auto rounded-sm border border-line bg-sunken p-3 text-xs leading-6 fit:h-auto fit:min-h-0 fit:grow">
       {lines.map((line, index) => (
         <div key={index} className="break-all">
           {line}
@@ -96,7 +97,7 @@ function Parsed({ sample }: { sample: RequestSample }): ReactElement {
   const headers = Object.entries(sample.headers)
 
   return (
-    <dl className="grid h-64 grid-cols-[6.5rem_1fr] content-start gap-x-3 gap-y-1 overflow-auto rounded-sm border border-line bg-sunken p-3 text-xs leading-6">
+    <dl className="grid h-64 grid-cols-[6.5rem_1fr] content-start gap-x-3 gap-y-1 overflow-auto rounded-sm border border-line bg-sunken p-3 text-xs leading-6 fit:h-auto fit:min-h-0 fit:grow">
       <Field label="method" value={sample.method} />
       <Field label="target" value={sample.target} />
       <Field label="path" value={sample.path} />
@@ -162,6 +163,9 @@ export function Requests({ snapshot }: { snapshot: MetricsSnapshot | null }): Re
       title="requests"
       hint="the last requests answered, newest first. click one to pin it."
       action={button}
+      // The panel that absorbs the slack: everything above it is sized to its content, so
+      // under `fit` this one ends level with the bottom of the window whatever height it is.
+      className="fit:min-h-0 fit:grow"
     >
       {selected === undefined ? (
         <p className="text-xs text-faint">
@@ -171,9 +175,9 @@ export function Requests({ snapshot }: { snapshot: MetricsSnapshot | null }): Re
         // The list is beside the two panes rather than above them, so picking a request and
         // reading it are one screen. Stacked, the panes started below the fold on a laptop and
         // every click cost a scroll down and back.
-        <div className="grid gap-4 2xl:grid-cols-[24rem_minmax(0,1fr)]">
+        <div className="grid gap-4 2xl:grid-cols-[24rem_minmax(0,1fr)] fit:min-h-0 fit:grow">
           <Pane label="recent" meta={`${samples.length} kept`}>
-            <div className="h-64 overflow-y-auto rounded-sm border border-line bg-sunken">
+            <div className="h-64 overflow-y-auto rounded-sm border border-line bg-sunken fit:h-auto fit:min-h-0 fit:grow">
               {samples.map((sample) => {
                 const key = keyOf(sample)
                 const isSelected = key === keyOf(selected)
@@ -201,7 +205,7 @@ export function Requests({ snapshot }: { snapshot: MetricsSnapshot | null }): Re
             </div>
           </Pane>
 
-          <div className="grid min-w-0 gap-4 md:grid-cols-2">
+          <div className="grid min-w-0 gap-4 md:grid-cols-2 fit:min-h-0">
             <Pane label="raw bytes" meta={`${new TextEncoder().encode(selected.head).length} B`}>
               <RawHead head={selected.head} />
             </Pane>
