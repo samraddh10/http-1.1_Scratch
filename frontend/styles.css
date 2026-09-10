@@ -3,6 +3,13 @@
 
 @import 'tailwindcss';
 
+/* The one layout switch on this page: with it the dashboard is exactly the height of the
+   window and every list scrolls inside its own pane, without it the page scrolls as an
+   ordinary document. It is on only where locking is an improvement -- wide enough for the
+   three-column row, and tall enough that the panes still have room to be read in. A short
+   window would otherwise clip the inspector rather than let the reader scroll to it. */
+@custom-variant fit (@media (min-width: 1280px) and (min-height: 640px));
+
 @theme {
   /* Four surfaces rather than two: the page, the panels on it, the row under the cursor,
      and the inset block that holds literal bytes. Depth comes from the surface stepping up,
