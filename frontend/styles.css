@@ -1,13 +1,27 @@
-/* module 8.1 -- the tailwind entry: the import, and the palette every utility reads from. */
+/* module 8.1 -- the tailwind entry: the import, the palette every utility reads from, and the
+   few base rules that no utility can express because they apply to every element. */
 
 @import 'tailwindcss';
 
 @theme {
-  --color-base: #0b0e11;
-  --color-panel: #12171c;
-  --color-line: #222a31;
-  --color-fg: #d7dee5;
-  --color-dim: #7c8b98;
+  /* Four surfaces rather than two: the page, the panels on it, the row under the cursor,
+     and the inset block that holds literal bytes. Depth comes from the surface stepping up,
+     so a border is only needed where something genuinely ends. */
+  --color-base: #080a0e;
+  --color-sunken: #05070a;
+  --color-panel: #0f151b;
+  --color-raise: #182028;
+
+  --color-line: #1e272f;
+  --color-edge: #2c3742;
+
+  /* Three weights of text, not two. `faint` is for the marks that are scaffolding rather
+     than data -- the drawn CRLF, a byte count next to a pane title -- which at `dim` compete
+     with the values they sit beside. */
+  --color-fg: #dce4ec;
+  --color-dim: #7f8e9c;
+  --color-faint: #4d5a66;
+
   --color-accent: #6fd3c7;
   --color-warn: #d8a657;
   --color-bad: #e06c75;
@@ -17,4 +31,42 @@
      would make every one of them move as the values change. */
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
     monospace;
+
+  /* Prose only: the tagline, and the line of explanation under a panel title. Nothing that
+     rewrites itself twice a second is set in it. Deliberately a system stack and not a
+     webfont -- this page is served by the server it describes, and a request to
+     fonts.googleapis.com would be the one asset on it that did not arrive over wirehttp. */
+  --font-sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+  }
+
+  /* Four panes on this page scroll inside themselves. A default scrollbar on a dark ground
+     is wide and pale enough to read as content rather than as chrome. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-edge) transparent;
+  }
+
+  /* The request rows are borderless by design, so a focus ring drawn from the border would
+     be invisible on exactly the control that most needs one. */
+  :focus-visible {
+    outline: 1px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* The only things that move here are values the server sent and the dot that says the stream
+   is open. Both stop for a reader who has asked motion to stop. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
