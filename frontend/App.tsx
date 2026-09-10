@@ -72,13 +72,16 @@ function Footer({ snapshot }: { snapshot: MetricsSnapshot | null }): ReactElemen
 
   return (
     <footer className="mt-auto border-t border-line bg-sunken">
-      <div className="mx-auto flex max-w-[1600px] flex-col gap-4 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+      <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between fit:py-3">
         <div className="min-w-0">
-          <p className="flex items-baseline gap-2.5">
+          <p className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
             <span className="font-semibold tracking-tight text-accent">Socket/1.1</span>
             <span className="text-xs text-faint">HTTP/1.1, written from the socket up</span>
           </p>
-          <p className="mt-1.5 max-w-prose font-sans text-xs leading-relaxed text-dim">
+          {/* Dropped where the page is locked to the window: the sentence is the first thing
+              worth trading for a taller inspector, and the line above it still names the
+              thing. */}
+          <p className="mt-1.5 max-w-prose font-sans text-xs leading-relaxed text-dim fit:hidden">
             the parser, the framing and the keep-alive accounting are written here; node's http
             module is a type import and nothing else. this page rides the same stream.
           </p>
@@ -98,9 +101,12 @@ export function App(): ReactElement {
   const { snapshot, status } = useMetricsStream()
 
   return (
-    // A column the height of the viewport, so the footer's `mt-auto` has a full-height parent
-    // to push off and sits at the bottom edge on a page whose panels do not reach it.
-    <div className="flex min-h-screen flex-col">
+    // A column the height of the viewport. Under `fit` it is exactly the viewport and clips:
+    // the dashboard then neither scrolls as a page nor leaves a band of base colour under the
+    // footer, because the inspector below takes whatever height is left over and its lists
+    // scroll inside themselves. Everywhere else the column is a floor, the page scrolls, and
+    // the footer's `mt-auto` still holds it to the bottom edge.
+    <div className="flex min-h-screen flex-col fit:h-screen fit:overflow-hidden">
       {/* Sticky, because the panels below it scroll past on a laptop and the stream badge is
           the one control that has to stay answerable at any scroll position. */}
       <header className="sticky top-0 z-10 border-b border-line bg-base/85 backdrop-blur">
@@ -123,7 +129,7 @@ export function App(): ReactElement {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-[1600px] flex-col gap-3 px-4 py-6 sm:px-6">
+      <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-3 px-4 py-6 sm:px-6 fit:min-h-0 fit:grow fit:py-4">
         <StatRow snapshot={snapshot} />
 
         {/* Three readings of the server as it stands, on one row: the rate, the outcomes, the
