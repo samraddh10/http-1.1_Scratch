@@ -22,6 +22,24 @@ const server = createServer(app)
 server.listen(3000)
 ```
 
+## The dashboard
+
+![The Socket/1.1 dashboard: open connections, requests per second, keep-alive reuse and
+requests served across the top; a requests-per-second curve, the status-code mix and a table
+of the open sockets below that; and along the bottom the request inspector, showing one
+request head as raw bytes beside the fields the parser read out of
+it.](assets/dashboard.png)
+
+Every number on that page came off this server's own counters, and the page itself was
+delivered by the parser it is describing. The panel at the bottom is the one worth the
+screenshot: on the left the last requests answered, in the middle the head exactly as it
+arrived -- CRLFs drawn in, because the delimiter is the thing the whole parser is built
+around -- and on the right the method, target, version, framing decision and headers that
+the state machine produced from those bytes.
+
+`npm start`, then <http://localhost:3000>. `fire 25 requests` puts traffic through the
+server without leaving the page.
+
 ## Quick start
 
 ```
@@ -98,6 +116,11 @@ The idle timeout is the slowloris control and the two header caps are the header
 control. A bad value throws at boot rather than falling back: `bytes > NaN` is always false,
 so a mistyped limit would disable the check and nothing would look wrong.
 
+The 408s visible in the screenshot's status-code panel are that idle timeout doing its job:
+a browser that opens a socket and keeps it for the next navigation gets five seconds of
+silence and then a timeout response, which is exactly the intended behaviour rather than a
+failure.
+
 ## Metrics and the dashboard
 
 The server records connection counts, request totals, a five-second requests-per-second
@@ -109,7 +132,8 @@ ms over server-sent events.
 The dashboard in [`frontend/`](frontend/) is React and Tailwind built by Vite into
 `public/`, and served by `express.static` through wirehttp itself. There is no dev server
 and no proxy: the page arrives over the wire format this project implements, or it does not
-arrive.
+arrive. Its own SSE connection is one of the sockets in the connections table, which is why
+one row's written bytes climb for as long as the tab is open.
 
 ## Tests
 
@@ -155,3 +179,4 @@ accept and teardown that both pay to the same kernel.
 ## License
 
 Unlicensed personal project.
+</content>
