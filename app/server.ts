@@ -69,6 +69,6 @@ app.use(reportError)
 // mounting costs one cast, written so that it suits either `createServer` above.
 const server = createServer(app as never)
 
-server.listen(config.port, () => {
-  console.log(`wirehttp listening on http://localhost:${config.port}`)
+server.listen(config.port, config.host, () => {
+  console.log(`wirehttp listening on http://${config.host}:${config.port}`)
 })
