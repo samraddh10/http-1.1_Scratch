@@ -8,12 +8,16 @@ export interface PanelProps {
   readonly hint?: ReactNode
   /** Rendered top right, for a panel that has a control or a count. */
   readonly action?: ReactNode
+  /** Appended to the section, for a panel whose parent has to place or size it. */
+  readonly className?: string
   readonly children: ReactNode
 }
 
-export function Panel({ title, hint, action, children }: PanelProps): ReactElement {
+export function Panel({ title, hint, action, className = '', children }: PanelProps): ReactElement {
   return (
-    <section className="flex min-w-0 flex-col rounded-md border border-line bg-panel">
+    <section
+      className={`flex min-w-0 flex-col rounded-md border border-line bg-panel ${className}`}
+    >
       <div className="flex items-start justify-between gap-4 border-b border-line px-4 py-3">
         <div className="min-w-0">
           <h2 className="flex items-center gap-2 text-xs font-medium tracking-[0.14em] uppercase">
@@ -26,7 +30,9 @@ export function Panel({ title, hint, action, children }: PanelProps): ReactEleme
         </div>
         {action}
       </div>
-      <div className="min-w-0 grow p-4">{children}</div>
+      {/* `min-h-0`, so a body that is told to fill the panel can hand a scrolling child a
+          height smaller than its content instead of growing past the panel's own. */}
+      <div className="flex min-h-0 min-w-0 grow flex-col p-4">{children}</div>
     </section>
   )
 }
