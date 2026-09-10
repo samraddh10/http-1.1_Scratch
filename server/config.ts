@@ -17,6 +17,13 @@ export interface Config {
   /** Port the TCP server binds. */
   port: number
 
+  /**
+   * Address the TCP server binds. Loopback by default, so a development server is never
+   * reachable from the network by accident; a host behind a proxy sets `0.0.0.0` so the
+   * proxy can connect to it.
+   */
+  host: string
+
   // -- Connection management (module 4) ------------------------------------------------
 
   /**
@@ -93,6 +100,7 @@ export interface Config {
 
 export const defaults: Config = {
   port: 3000,
+  host: '127.0.0.1',
 
   idleTimeoutMs: 5_000,
   maxConnections: 512,
@@ -145,6 +153,7 @@ function positiveInt(env: Env, key: keyof Config, fallback: number): number {
 export function loadConfig(env: Env = process.env, base: Config = defaults): Config {
   return {
     port: positiveInt(env, 'port', base.port),
+    host: env[envNameFor('host')] || base.host,
 
     idleTimeoutMs: positiveInt(env, 'idleTimeoutMs', base.idleTimeoutMs),
     maxConnections: positiveInt(env, 'maxConnections', base.maxConnections),
